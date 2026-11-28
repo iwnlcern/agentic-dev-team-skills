@@ -905,6 +905,7 @@ class TestRestore(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before)
 
     def test_restore_cancels_each_staged_ledger_before_swap(self):
+        import re
         from relay_engine import restore_cancel
 
         uninterrupted = None
@@ -928,6 +929,12 @@ class TestRestore(unittest.TestCase):
                     calls.append(project)
                     return cancel(conn, project, job, now)
                 def preparing(path):
+                    path = Path(path)
+                    job = self.root / 'recovery' / JOB
+                    if (path.name == 'machine.sqlite3' and path.parent.parent == job
+                            and re.fullmatch(r'observe-work-[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}',
+                                             path.parent.name)):
+                        return prepare(path)
                     self.assertEqual(calls, [P, Q])
                     if cut == 2 and not stop[0]:
                         stop[0] = True
@@ -1073,3 +1080,442 @@ class TestRestore(unittest.TestCase):
                 with closing(store_steps.open_journal(self.root / 'recovery' / JOB)) as journal:
                     self.assertNotIn('restore-classes', [x[0] for x in store_backup._rows(
                         journal._conn, 'SELECT phase FROM checkpoints')])
+
+    def stop_write(self, method, scope, project, by):
+        return self.turns.run(store_steps.Declared('written', {}), lambda c: method(
+            c['catalogue'], scope, project, by))
+
+    def stop_rows(self, root=None):
+        from contextlib import closing
+        cat = store_layout.catalogue_path(root or self.root)
+        with closing(store_backup._offline_read(cat)) as conn:
+            return tuple(store_backup._rows(conn, sql) for sql in (
+                'SELECT * FROM engine_stops ORDER BY row_id',
+                'SELECT * FROM engine_stop_events ORDER BY event_id',
+                "SELECT position,epoch,anchor_id FROM queue_highwaters WHERE project_id IS NULL AND source='stop_events'",
+            ))
+
+    def history(self):
+        self.make(P)
+        self.make(Q)
+        self.stop_write(store_layout.record_stop, 'project', P, 'old')
+        self.stop_write(store_layout.record_start, 'project', P, 'old')
+        self.stop_write(store_layout.record_stop, 'project', Q, 'old')
+        backup = self.snapshot()
+        self.stop_write(store_layout.record_start, 'project', Q, 'new')
+        self.stop_write(store_layout.record_stop, 'project', P, 'new')
+        self.stop_write(store_layout.record_stop, 'store', None, 'new')
+        self.turns.run(store_steps.Declared('written', {}), lambda c: c['catalogue'].execute(
+            "INSERT INTO queue_highwaters VALUES (NULL,'stop_events',6,3,NULL)").close())
+        return backup
+
+    def journal_path(self, job=JOB):
+        return self.root / 'recovery' / job
+
+    def checkpoint_data(self, phase, job=JOB):
+        from contextlib import closing
+        with closing(store_steps.open_journal(self.journal_path(job))) as journal:
+            data, = store_backup._rows(journal._conn, 'SELECT data FROM checkpoints WHERE phase=?', (phase,))
+            return json.loads(data[0])
+
+    def stop_before(self, phase, backup, *, confirm=False):
+        write = store_steps.Journal.checkpoint
+        def cut(journal, step, data):
+            if step == phase:
+                raise self.Crash()
+            return write(journal, step, data)
+        with mock.patch.object(store_steps.Journal, 'checkpoint', cut):
+            with self.assertRaises(self.Crash):
+                self.restore(backup, confirm=confirm)
+
+    def test_restore_carries_the_stopped_state(self):
+        backup = self.history()
+        rows = self.stop_rows()
+        self.assertEqual(tuple(map(len, rows)), (4, 6, 1))
+        self.restore(backup, confirm=False)
+        staged_rows = self.stop_rows(self.journal_path() / 'store')
+        self.restore(backup)
+        open_count = sum(row[2] is None and row[5] is None for row in self.stop_rows()[0])
+        self.assertEqual(open_count, 1)
+        self.assertEqual(staged_rows, rows)
+        self.assertEqual(self.stop_rows(), rows)
+        self.assertGreater(self.stop_write(store_layout.record_start, 'store', None, 'next'), 6)
+
+    def test_restore_rebuild_keeps_guards(self):
+        from contextlib import closing
+        from relay_engine import catalogue
+        backup = self.history()
+        live = self.stop_rows()
+        self.make(R)
+        self.stop_write(store_layout.record_stop, "project", R, "filtered")
+        self.restore(backup)
+        self.assertEqual(self.stop_rows(), live)
+        with closing(store_layout.open_catalogue(self.root)) as conn:
+            catalogue._require_matching(conn)
+            self.assertEqual(store_backup._rows(conn, 'PRAGMA foreign_key_check'), [])
+            for table in ('engine_stops', 'engine_stop_events'):
+                with self.assertRaisesRegex(sqlite3.IntegrityError, table + ' cannot be deleted'):
+                    conn.execute('DELETE FROM ' + table).close()
+
+        with self.subTest(validation='post-rebuild schema'):
+            self.reset('post-rebuild-schema')
+            backup = self.snapshot()
+            self.stop_write(store_layout.record_stop, 'store', None, 'live-only')
+            live = store_layout.catalogue_path(self.root)
+            live_before = live.read_bytes()
+            staged = self.journal_path() / 'store'
+            staged_cat = store_layout.catalogue_path(staged)
+            matching = catalogue._require_matching
+            tampered = []
+
+            def mismatch_after_rebuild(conn):
+                database = store_backup._rows(conn, 'PRAGMA database_list')[0][2]
+                if (database == str(staged_cat) and conn.in_transaction
+                        and store_backup._rows(conn, "SELECT stopped_by FROM engine_stops") == [('live-only',)]):
+                    conn.execute('DROP TRIGGER engine_stops_guard_delete').close()
+                    tampered.append(database)
+                return matching(conn)
+
+            with mock.patch.object(catalogue, '_require_matching', mismatch_after_rebuild):
+                with self.assertRaises(store_steps.FenceBreach) as stopped:
+                    self.restore(backup)
+            self.assertEqual(tampered, [str(staged_cat)])
+            self.assertEqual(stopped.exception.__cause__.code, 'E-SCHEMA-MISMATCH')
+            self.assertEqual(live.read_bytes(), live_before)
+            with closing(store_steps.open_journal(self.journal_path())) as journal:
+                self.assertEqual(store_backup._rows(journal._conn,
+                    "SELECT r.intent_id FROM intents i LEFT JOIN receipts r ON i.id=r.intent_id"
+                    " WHERE i.step='restore-carry'"), [(None,)])
+            with closing(store_backup._offline_read(staged_cat)) as conn:
+                matching(conn)
+                self.assertEqual(store_backup._rows(conn, 'SELECT * FROM engine_stops'), [])
+
+    def test_restore_stop_not_kept_line(self):
+        backup = self.history()
+        self.make(R)
+        self.stop_write(store_layout.record_stop, 'project', R, 'new')
+        failure = None
+        try:
+            report = self.restore(backup)
+        except (sqlite3.Error, store_steps.FenceBreach) as exc:
+            failure = exc
+        self.assertIsNone(failure)
+        self.assertEqual(report.stops_not_kept, (R,))
+        rows, events, _ = self.stop_rows()
+        self.assertNotIn(R, [row[2] for row in rows])
+        self.assertLessEqual({row[1] for row in events}, {row[0] for row in rows})
+        lines = report.lines()
+        pos = lines.index(store_backup.STOP_NOT_KEPT_LINE.format(name=R))
+        self.assertEqual(lines[pos + 1], store_backup.NOTICES_LINE)
+        self.assertEqual(lines[pos + 2:], store_backup.RESTORE_LIMITS)
+
+    def test_lost_store_restore_leaves_store_stopped(self):
+        for opaque in (False, True):
+            with self.subTest(opaque=opaque):
+                self.reset('lost-'+str(opaque))
+                backup = self.snapshot()
+                main = store_layout.catalogue_path(self.root)
+                main.unlink()
+                if opaque:
+                    main.write_bytes(b'old unreadable catalogue')
+                    Path(str(main)+'-wal').write_bytes(b'opaque wal')
+                receipt = store_steps.Journal.receipt
+                def cut(journal, ident, observed):
+                    if store_backup._rows(journal._conn, 'SELECT step FROM intents WHERE id=?',
+                                          (ident,)) == [('restore-lost-stop',)]:
+                        raise self.Crash()
+                    receipt(journal, ident, observed)
+                with mock.patch.object(store_steps.Journal, 'receipt', cut):
+                    with self.assertRaises(self.Crash):
+                        store_backup.restore(self.root, backup.path, JOB, serving_stopped=True,
+                                             confirm=True, now_ms=NOW+100, stopped_by='named-restore')
+                report = self.restore(backup)
+                self.assertEqual(report.mode, 'lost')
+                rows, events, _ = self.stop_rows()
+                self.assertEqual([(r[1], r[4], r[5]) for r in rows], [('store', 'named-restore', None)])
+                self.assertEqual(len(events), 1)
+                if opaque:
+                    lost = self.journal_path() / 'lost'
+                    self.assertEqual((lost / main.name).read_bytes(), b'old unreadable catalogue')
+                    self.assertEqual((lost / (main.name+'-wal')).read_bytes(), b'opaque wal')
+
+    def test_restore_observation_writes_nothing_live(self):
+        for absent in (False, True):
+            with self.subTest(absent=absent):
+                self.reset('observe-'+str(absent))
+                backup = self.snapshot()
+                main = store_layout.catalogue_path(self.root)
+                if absent:
+                    main.unlink()
+                def members():
+                    return {p.name: (p.stat().st_mode, p.read_bytes()) for p in main.parent.glob(main.name+'*')}
+                before = members()
+                self.stop_before('restore-staged', backup)
+                self.assertEqual(members(), before)
+                start = self.checkpoint_data('restore-start')
+                self.assertEqual(start['mode'], 'lost' if absent else 'readable')
+                self.assertEqual(start['job_id'], JOB)
+                self.assertEqual([record['name'] for record in start['observed']], [] if absent else [main.name])
+                if not absent:
+                    copy = self.journal_path() / 'observed' / main.name
+                    self.assertEqual(copy.read_bytes(), before[main.name][1])
+                    self.assertEqual(stat.S_IMODE(copy.stat().st_mode), 0o400)
+                else:
+                    with store_layout.open_catalogue(self.root) as conn:
+                        self.assertTrue(main.is_file())
+                    conn.close()
+
+    def test_restore_observation_restart(self):
+        backup = self.snapshot()
+        folder = self.journal_path()
+        partial = folder / 'observed.partial'
+        partial.mkdir(parents=True)
+        (partial / 'machine.sqlite3').write_bytes(b'incomplete copy')
+        self.stop_before('restore-start', backup)
+        main = store_layout.catalogue_path(self.root)
+        observed = folder / 'observed' / main.name
+        self.assertEqual(observed.read_bytes(), main.read_bytes())
+        self.assertFalse(partial.exists())
+        with observed.open('rb') as prior:
+            self.restore(backup, confirm=False)
+            self.assertNotEqual(observed.stat().st_ino, os.fstat(prior.fileno()).st_ino)
+        pinned = observed.read_bytes()
+        with main.open('ab') as file:
+            file.write(b'outside drift')
+        with self.assertRaises(store_steps.FenceBreach):
+            self.restore(backup)
+        self.assertEqual(observed.read_bytes(), pinned)
+
+    def test_restore_live_fence(self):
+        from contextlib import closing
+        for control in ('prepared', 'shm', 'observed', 'payload'):
+            with self.subTest(control=control):
+                self.reset('fence-'+control)
+                backup = self.snapshot()
+                main = store_layout.catalogue_path(self.root)
+                # Leave committed frames without an open writer for the restore.
+                conn = sqlite3.connect(main, isolation_level=None)
+                conn.execute('PRAGMA journal_mode=WAL').close()
+                conn.execute('PRAGMA wal_autocheckpoint=0').close()
+                before_write = main.read_bytes()
+                conn.execute("INSERT INTO queue_highwaters VALUES(NULL,'stop_events',3,2,NULL)").close()
+                outstanding = Path(str(main)+'-wal').read_bytes()
+                conn.close()
+                self.assertGreater(len(outstanding), 32)
+                # Restore the pre-transaction main; closing the last connection checkpointed it.
+                self.assertNotEqual(main.read_bytes(), before_write)
+                main.write_bytes(before_write)
+                Path(str(main)+'-wal').write_bytes(outstanding)
+                permit = store_steps.Journal.receipt
+                def cut(journal, ident, observed):
+                    if store_backup._rows(journal._conn, "SELECT step FROM intents WHERE id=? AND target LIKE ?",
+                                          (ident, '%/replaced/machine.sqlite3%')) == [('restore-prepare',)]:
+                        raise self.Crash()
+                    permit(journal, ident, observed)
+                with mock.patch.object(store_steps.Journal, 'receipt', cut):
+                    with self.assertRaises(self.Crash):
+                        self.restore(backup)
+                self.assertFalse(Path(str(main)+'-wal').exists())
+                start = self.checkpoint_data('restore-start')
+                self.assertEqual(start['observed'][0]['sha256'], hashlib.sha256(before_write).hexdigest())
+                self.assertNotEqual(start['prepared']['sha256'], start['observed'][0]['sha256'])
+                if control == 'shm':
+                    Path(str(main)+'-shm').write_bytes(b'appearance')
+                elif control == 'observed':
+                    p = self.journal_path() / 'observed' / main.name
+                    p.chmod(0o600)
+                    p.write_bytes(p.read_bytes()+b'changed input')
+                elif control == 'payload':
+                    with closing(store_steps.open_journal(self.journal_path())) as journal, journal._conn:
+                        val = self.checkpoint_data('restore-start')
+                        val['payload']['routes'] = [{'project_id': P, 'name': P, 'state': 'active'}]
+                        journal._conn.execute("UPDATE checkpoints SET data=? WHERE phase='restore-start'",
+                                              (json.dumps(val),)).close()
+                before = main.read_bytes()
+                if control == 'prepared':
+                    failure = None
+                    try:
+                        report = self.restore(backup)
+                    except store_steps.FenceBreach as exc:
+                        failure = exc
+                    self.assertIsNone(failure)
+                    self.assertEqual(report.mode, 'readable')
+                    self.assertEqual(self.stop_rows()[2], [(3, 2, None)])
+                else:
+                    with self.assertRaises(store_steps.FenceBreach):
+                        self.restore(backup)
+                    self.assertEqual(main.read_bytes(), before)
+
+    def test_restore_overlap_restore_side(self):
+        from contextlib import closing
+        saved_job = JOB[:-1]+'9'
+        for mode in ('readable', 'lost'):
+            with self.subTest(mode=mode):
+                self.reset('overlap-'+mode)
+                backup = self.snapshot()
+                if mode == 'lost':
+                    store_layout.catalogue_path(self.root).unlink()
+                self.restore(backup, confirm=False)
+                with self.assertRaises(store_backup.RestoreRefused) as rejected:
+                    self.restore(backup, job=saved_job)
+                self.assertEqual((rejected.exception.reason, rejected.exception.detail), ('job-open', JOB))
+                self.assertEqual(self.restore(backup, confirm=False).mode, mode)
+                start = self.checkpoint_data('restore-start')
+                proof = hashlib.sha256(json.dumps(start, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+                with closing(store_steps.open_journal(self.journal_path())) as journal:
+                    journal.checkpoint('restore-abandoned', dict(job_id=JOB, start_sha256='bad'))
+                self.assertIn(JOB, store_backup.open_restores(self.root))
+                with closing(store_steps.open_journal(self.journal_path())) as journal:
+                    journal.checkpoint('restore-abandoned', dict(job_id=saved_job, start_sha256=proof))
+                self.assertIn(JOB, store_backup.open_restores(self.root))
+                with closing(store_steps.open_journal(self.journal_path())) as journal:
+                    journal.checkpoint('restore-abandoned', dict(job_id=JOB, start_sha256=proof))
+                self.assertNotIn(JOB, store_backup.open_restores(self.root))
+                with self.assertRaises(store_backup.RestoreRefused):
+                    self.restore(backup)
+                self.restore(backup, job=saved_job, confirm=False)
+
+    def test_restore_admits_refused_undo(self):
+        from contextlib import closing
+        fixture, _ = self.fixture_migration()
+        for case in ('native', 'queue', 'mismatch', 'pending', 'reopened'):
+            with self.subTest(case=case):
+                migrate, root, self.turns, legacy, job, project, _ = fixture._undo_fixture(
+                    'restore-overlap-'+case)
+                self.root = root
+                if case == 'native':
+                    fixture._undo_native_relay(self.turns, project)
+                    reject = None
+                else:
+                    def reject(*args, **kwargs):
+                        raise fixture._QueueBlocked(('blocked',))
+                with self.assertRaises(migrate.UndoRefused):
+                    fixture._undo_call(migrate, root, self.turns, job, reject)
+                backup = self.snapshot()
+                if case not in ('native', 'queue'):
+                    with closing(store_steps.open_journal(fixture.job_path(root, job))) as journal, journal._conn:
+                        rid, raw = store_backup._rows(journal._conn,
+                            "SELECT id,target FROM intents WHERE step='undo-refuse'")[-1]
+                        if case == 'mismatch':
+                            target = json.loads(raw)
+                            target['route_intent'] += 999
+                            encoded = json.dumps(target)
+                            journal._conn.execute('UPDATE intents SET target=? WHERE id=?', (encoded, rid)).close()
+                            journal._conn.execute('UPDATE receipts SET observed=? WHERE intent_id=?',
+                                                  (encoded, rid)).close()
+                        elif case == 'pending':
+                            journal._conn.execute('DELETE FROM receipts WHERE intent_id=?', (rid,)).close()
+                        else:
+                            route, = store_backup._rows(journal._conn,
+                                "SELECT id FROM intents WHERE step='undo-route'")[0]
+                            journal.receipt(route, {'reopened': True})
+                if case in ('native', 'queue'):
+                    self.assertEqual(self.restore(backup, confirm=False).mode, 'readable')
+                else:
+                    with self.assertRaises(store_backup.RestoreRefused) as rejected:
+                        self.restore(backup)
+                    self.assertEqual((rejected.exception.reason, rejected.exception.detail),
+                                     ('job-open', job))
+
+    def test_lost_rename_resumes_per_member(self):
+        for edge in ('machine.sqlite3', 'machine.sqlite3-wal', 'replacement', 'occupied', 'newwal'):
+            with self.subTest(edge=edge):
+                self.reset('rename-'+edge)
+                backup = self.snapshot()
+                main = store_layout.catalogue_path(self.root)
+                content = {main.name: b'bad main'}
+                if edge != 'newwal':
+                    content.update({main.name+'-wal': b'bad wal', main.name+'-shm': b'bad shm'})
+                for name, data in content.items():
+                    (self.root/name).write_bytes(data)
+                ino = main.stat().st_ino
+                if edge in content:
+                    if edge == main.name:
+                        rename = os.rename
+                        def cut(src, dst):
+                            rename(src, dst)
+                            if Path(dst) == self.journal_path()/'lost'/edge:
+                                raise self.Crash()
+                        patch = mock.patch.object(os, 'rename', cut)
+                    else:
+                        receipt = store_steps.Journal.receipt
+                        def after(journal, ident, value):
+                            receipt(journal, ident, value)
+                            if store_backup._rows(journal._conn, "SELECT step FROM intents WHERE id=? AND target LIKE ?",
+                                                  (ident, '%'+edge+'%')) == [('restore-lost-move',)]:
+                                raise self.Crash()
+                        patch = mock.patch.object(store_steps.Journal, 'receipt', after)
+                    with patch, self.assertRaises(self.Crash):
+                        self.restore(backup)
+                    self.assertEqual(self.restore(backup).mode, 'lost')
+                    self.assertEqual({p.name:p.read_bytes() for p in (self.journal_path()/'lost').iterdir()},
+                                     content)
+                    self.assertEqual((self.journal_path()/'lost'/main.name).stat().st_ino, ino)
+                    self.assertNotEqual(main.stat().st_ino, ino)
+                else:
+                    self.restore(backup, confirm=False)
+                    if edge == 'replacement':
+                        other = main.with_suffix('.replacement')
+                        other.write_bytes(b'replacement')
+                        os.replace(other, main)
+                        changed = main
+                    elif edge == 'occupied':
+                        changed = self.journal_path()/'lost'/main.name
+                        changed.parent.mkdir()
+                        changed.write_bytes(b'unrelated')
+                    else:
+                        changed = Path(str(main)+'-wal')
+                        changed.write_bytes(b'appeared')
+                    before = changed.read_bytes()
+                    with self.assertRaises(store_steps.FenceBreach):
+                        self.restore(backup)
+                    self.assertEqual(changed.read_bytes(), before)
+
+    def test_restore_excluded_pinned(self):
+        backup = self.snapshot()
+        self.make(P)
+        self.stop_write(store_layout.record_stop, 'project', P, 'new')
+        self.assertEqual(self.restore(backup, confirm=False).stops_not_kept, (P,))
+        self.assertEqual(self.checkpoint_data('restore-excluded'), [P])
+        self.assertEqual(self.restore(backup).stops_not_kept, (P,))
+        self.assertEqual(self.restore(backup).stops_not_kept, (P,))
+
+    def test_restore_jobs_lock(self):
+        import errno
+        import fcntl
+        backup = self.snapshot()
+        lock = self.root/'jobs.lock'
+        with lock.open('xb') as holder:
+            lock.chmod(0o600)
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            jobs_lock = store_backup.jobs_lock
+            with mock.patch.object(store_backup, 'jobs_lock', side_effect=lambda root: jobs_lock(root, wait_s=0.2)):
+                with self.assertRaises(store_backup.RestoreRefused) as busy:
+                    self.restore(backup)
+            self.assertEqual((busy.exception.reason, busy.exception.detail), ('jobs-busy', None))
+            self.assertFalse(self.journal_path().exists())
+        flock = fcntl.flock
+        def inspect(fd, op):
+            self.assertFalse(os.get_inheritable(fd))
+            raise OSError(errno.ENOLCK, 'no lock')
+        with mock.patch.object(fcntl, 'flock', inspect):
+            with self.assertRaises(store_backup.RestoreRefused) as failed:
+                self.restore(backup)
+        self.assertEqual((failed.exception.reason, failed.exception.detail), ('jobs-lock-error', 'ENOLCK'))
+        self.assertFalse(self.journal_path().exists())
+        self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
+        self.assertIs(fcntl.flock, flock)
+
+    def test_unmark_offer_text(self):
+        offer = "Project {name} is offline. The restored backup is from before {name} moved, but {name}'s old folders are still marked as moved. Restore {name}'s old folders so 2.9.7 can use them again? Work done in v3 after the backup is not in the restored backup."
+        one = store_backup.MovedJob(JOB, 'sample', ('/fixture/old',), 'journal')
+        unavailable = store_backup.MovedJob(JOB[:-1]+'2', 'unavailable', (), 'unavailable')
+        missing = store_backup.MovedJob(JOB[:-1]+'3', 'unlisted', ('/fixture/other',), 'journal')
+        loss = store_backup.RestoreLoss(P, 'sample', None, None, True)
+        report = store_backup.RestoreReport('store', (loss,), [one, unavailable, missing], (P,), ())
+        lines = report.lines()
+        self.assertEqual(store_backup.UNMARK_OFFER_LINE, offer)
+        self.assertEqual(lines[lines.index(loss.line())+1], offer.format(name='sample'))
+        self.assertEqual(lines[lines.index(missing.line())+1], offer.format(name='unlisted'))
+        self.assertEqual(lines.count(offer.format(name='sample')), 1)
+        self.assertNotIn(offer.format(name='unavailable'), lines)

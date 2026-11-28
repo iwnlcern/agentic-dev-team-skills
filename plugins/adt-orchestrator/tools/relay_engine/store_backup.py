@@ -1,8 +1,10 @@
 """Consistent, evidence-pinned backups inside the caller's declared turn."""
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import errno
+import fcntl
 import hashlib
 import json
 from pathlib import Path
@@ -11,6 +13,7 @@ import stat
 import shutil
 import sqlite3
 import time
+import uuid
 
 from relay_engine import store_evidence, store_layout, store_steps, version
 
@@ -308,6 +311,12 @@ def prune(root, settings: BackupSettings, now_ms: int) -> list[str]:
     return removed
 
 
+JOBS_LOCK_WAIT_S = 10
+STOP_NOT_KEPT_LINE = "Project {name}'s stop was not kept: {name} is not in the restored backup."
+NOTICES_LINE = "Stops and starts after the backup's moment are kept, but their notices are not in the restored queue."
+UNMARK_OFFER_LINE = ("Project {name} is offline. The restored backup is from before {name} moved, but "
+                     "{name}'s old folders are still marked as moved. Restore {name}'s old folders so 2.9.7 "
+                     "can use them again? Work done in v3 after the backup is not in the restored backup.")
 LEDGER_CLASSES = ('cancel', 'creating-no-row')
 HELD_LINE = 'Restoring cancels every go-ahead and approval in project {name} and holds {name} until you end the hold at the terminal.'
 BEING_CREATED_LINE = 'Project {name} was still being created at the backup\'s moment; the restore finishes creating it, and it is not held.'
@@ -369,22 +378,402 @@ class RestoreReport:
     moved_jobs: list[MovedJob]
     held: tuple[str, ...]
     being_created: tuple[str, ...]
+    mode: str = 'readable'
+    stops_not_kept: tuple[str, ...] = ()
 
     def lines(self) -> tuple[str, ...]:
         lines = []
+        offers = set()
         for loss in self.losses:
             lines.append(loss.line())
+            for index, job in enumerate(self.moved_jobs):
+                if index not in offers and job.state == 'journal' and job.project_name == loss.project_name:
+                    lines.append(UNMARK_OFFER_LINE.format(name=job.project_name))
+                    offers.add(index)
             if loss.project_id in self.held:
                 lines.append(HELD_LINE.format(name=loss.project_name))
             if loss.project_id in self.being_created:
                 lines.append(BEING_CREATED_LINE.format(name=loss.project_name))
-        return tuple(lines) + tuple(job.line() for job in self.moved_jobs) + RESTORE_LIMITS
+        for index, job in enumerate(self.moved_jobs):
+            lines.append(job.line())
+            if job.state == 'journal' and index not in offers:
+                lines.append(UNMARK_OFFER_LINE.format(name=job.project_name))
+        lines.extend(STOP_NOT_KEPT_LINE.format(name=name) for name in self.stops_not_kept)
+        if self.mode == 'readable':
+            lines.append(NOTICES_LINE)
+        return tuple(lines) + RESTORE_LIMITS
 
 
 def pending_creations(catalogue_conn) -> list[str]:
     return [project for project, in _rows(
         catalogue_conn, "SELECT project_id FROM project_routes WHERE state='creating'"
         " AND held_by_job IS NULL ORDER BY name")]
+
+
+class JobsBusy(Exception):
+    pass
+
+
+class JobsLockError(Exception):
+    def __init__(self, errno_name: str):
+        self.errno_name = errno_name
+        super().__init__(errno_name)
+
+
+@contextmanager
+def jobs_lock(root, *, wait_s: float = JOBS_LOCK_WAIT_S):
+    path = Path(root) / 'jobs.lock'
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        raise JobsLockError(errno.errorcode.get(exc.errno, str(exc.errno))) from exc
+    try:
+        deadline = time.monotonic() + wait_s
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EINTR):
+                    raise JobsLockError(errno.errorcode.get(exc.errno, str(exc.errno))) from exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise JobsBusy() from exc
+                time.sleep(min(0.05, remaining))
+        yield
+    finally:
+        os.close(fd)
+
+
+def _canonical_restore(data):
+    return json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
+
+
+def _restore_checkpoints(conn):
+    checkpoints = {}
+    for phase, raw in _rows(conn, 'SELECT phase,data FROM checkpoints ORDER BY id'):
+        if phase in checkpoints and phase != 'restore-abandoned':
+            raise ValueError(f'duplicate restore checkpoint: {phase}')
+        checkpoints[phase] = json.loads(raw)
+    return checkpoints
+
+
+def _probe_restore(root, job_path):
+    db = job_path / 'job.sqlite3'
+    _restore_parents(db, root, missing=True)
+    if not os.path.lexists(db):
+        return {}, None
+    _ordinary_file(db, root)
+    with closing(_offline_read(db)) as conn:
+        return _restore_checkpoints(conn), _rows(conn, 'SELECT phase FROM checkpoints ORDER BY id DESC LIMIT 1')
+
+
+def _abandoned(job_id, checkpoints, last):
+    start = checkpoints.get('restore-start')
+    terminal = checkpoints.get('restore-abandoned')
+    return (last == [('restore-abandoned',)] and isinstance(terminal, dict)
+            and isinstance(start, dict)
+            and terminal.get('job_id') == job_id
+            and terminal.get('start_sha256') == hashlib.sha256(_canonical_restore(start)).hexdigest())
+
+
+def open_restores(root) -> tuple[str, ...]:
+    root = Path(root)
+    recovery = root / 'recovery'
+    if not os.path.lexists(recovery):
+        return ()
+    _restore_parents(recovery / 'unused', root)
+    opened = []
+    for folder in sorted(recovery.iterdir()):
+        if folder.is_symlink() or not folder.is_dir():
+            continue
+        checkpoints, last = _probe_restore(root, folder)
+        if 'restore-start' not in checkpoints:
+            continue
+        start = checkpoints['restore-start']
+        if (start.get('job_id') != folder.name
+                or (last != [('restore-done',)] and not _abandoned(folder.name, checkpoints, last))):
+            opened.append(folder.name)
+    return tuple(opened)
+
+
+def _open_undo(root, store_id):
+    migrations = root / 'migrations'
+    if not migrations.is_dir() or migrations.is_symlink():
+        return None
+    for folder in sorted(migrations.iterdir()):
+        if folder.is_symlink() or not folder.is_dir():
+            continue
+        try:
+            store_layout._canonical_job(folder.name)
+        except ValueError:
+            continue
+        db = folder / 'job.sqlite3'
+        if not os.path.lexists(db):
+            continue
+        _ordinary_file(db, root)
+        with closing(_offline_read(db)) as conn:
+            route, routed = _journal_record_view(conn, 'undo-route', lambda _: True)
+            if route is None:
+                continue
+            records = _rows(conn, 'SELECT data FROM checkpoints ORDER BY id DESC LIMIT 1')
+            if not records or json.loads(records[0][0]).get('store_id') != store_id:
+                continue
+            if routed is not None:
+                _, released = _journal_record_view(conn, 'undo-release', lambda _: True)
+                if released is None:
+                    return folder.name
+            else:
+                tail = _rows(conn, 'SELECT i.step,i.target,r.observed FROM intents i LEFT JOIN receipts r'
+                             ' ON i.id=r.intent_id ORDER BY i.id DESC LIMIT 1')
+                step, target, receipt = tail[0]
+                if (step != 'undo-refuse' or receipt is None or target != receipt
+                        or json.loads(receipt).get('route_intent') != route.id):
+                    return folder.name
+    return None
+
+
+_RESTORE_CATALOGUE = ('machine.sqlite3', 'machine.sqlite3-wal', 'machine.sqlite3-shm')
+_STOP_OBJECTS = frozenset({'engine_stops', 'engine_stop_events', 'engine_stops_one_open',
+                           'engine_stops_guard_update', 'engine_stops_guard_delete',
+                           'engine_stop_events_guard_update', 'engine_stop_events_guard_delete'})
+
+
+def _restore_file_stat(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        raise store_steps.FenceBreach('ordinary file', 'ordinary file', str(path))
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _restore_observation(root, job_path):
+    from relay_engine import catalogue, errors
+
+    partial, observed = job_path / 'observed.partial', job_path / 'observed'
+    for path in (partial, observed, *job_path.glob('observe-work-*')):
+        if os.path.lexists(path):
+            _restore_parents(path / 'unused', job_path)
+            shutil.rmtree(path)
+    store_evidence._mkdir(partial)
+    stats = {name: _restore_file_stat(root / name) for name in _RESTORE_CATALOGUE}
+    copies, lost_members = [], []
+    for index, name in enumerate(_RESTORE_CATALOGUE):
+        before = stats[name]
+        if before is None:
+            continue
+        source = root / name
+        target = partial / name
+        if index < 2:
+            with source.open('rb') as input_file, target.open('xb') as output:
+                shutil.copyfileobj(input_file, output)
+                os.fchmod(output.fileno(), 0o400)
+                store_evidence._sync_file(output)
+            record = _file_record(target)
+            copies.append(dict(name=name, **record))
+        else:
+            record = _file_record(source)
+        lost_members.append(dict(name=name, dev=before[0], ino=before[1], **record))
+    for name, before in stats.items():
+        if _restore_file_stat(root / name) != before:
+            raise store_steps.FenceBreach(before, before, str(root / name))
+    store_evidence._sync_dir(partial)
+    os.rename(partial, observed)
+    store_evidence._sync_dir(job_path)
+
+    if stats[_RESTORE_CATALOGUE[0]] is None:
+        return dict(mode='lost', observed=copies, observation_error='live catalogue is missing',
+                    lost_members=lost_members)
+
+    def work_copy():
+        work = job_path / ('observe-work-' + uuid.uuid4().hex)
+        store_evidence._mkdir(work)
+        try:
+            for row in copies:
+                target = work / row['name']
+                shutil.copyfile(observed / row['name'], target)
+                target.chmod(0o600)
+        except BaseException:
+            shutil.rmtree(work)
+            raise
+        return work
+
+    work = work_copy()
+    try:
+        try:
+            catalogue_file = work / _RESTORE_CATALOGUE[0]
+            with closing(sqlite3.connect(catalogue_file.as_uri() + '?mode=rw', uri=True)) as cat:
+                catalogue._require_matching(cat)
+                (store_id,), = _rows(cat, 'SELECT store_id FROM catalogue_identity WHERE id=1')
+        except (sqlite3.Error, errors.EngineError, ValueError) as exc:
+            return dict(mode='lost', observed=copies, observation_error=str(exc),
+                        lost_members=lost_members)
+    finally:
+        shutil.rmtree(work)
+    work = work_copy()
+    try:
+        catalogue_file = work / _RESTORE_CATALOGUE[0]
+        with closing(sqlite3.connect(catalogue_file.as_uri() + '?mode=rw', uri=True)) as cat:
+            holds = _rows(cat, 'SELECT job_id FROM maintenance_holds ORDER BY job_id LIMIT 1')
+            if holds:
+                raise RestoreRefused('job-open', holds[0][0])
+            payload = dict(
+                stops=_rows(cat, 'SELECT * FROM engine_stops ORDER BY row_id'),
+                events=_rows(cat, 'SELECT * FROM engine_stop_events ORDER BY event_id'),
+                sequence=_stop_sequence(cat),
+                cursor=_rows(cat, "SELECT * FROM queue_highwaters WHERE project_id IS NULL AND source='stop_events'"),
+                routes=[dict(project_id=route.project_id, name=route.name, state=route.state)
+                        for route in store_layout.project_routes(cat)],
+            )
+    finally:
+        shutil.rmtree(work)
+    if (undo := _open_undo(root, store_id)) is not None:
+        raise RestoreRefused('job-open', undo)
+    work = work_copy()
+    try:
+        prepared = store_steps.prepare_database(work / _RESTORE_CATALOGUE[0])
+    finally:
+        shutil.rmtree(work)
+    return dict(mode='readable', observed=copies, live_store_id=store_id, payload=payload,
+                payload_sha256=hashlib.sha256(_canonical_restore(payload)).hexdigest(),
+                prepared=vars(prepared))
+
+
+def _restore_verify_observation(job_path, start):
+    observed = job_path / 'observed'
+    try:
+        _restore_parents(observed / 'unused', job_path)
+    except (FileNotFoundError, ValueError) as exc:
+        raise store_steps.FenceBreach('observation directory', 'observation directory', str(observed)) from exc
+    expected_names = {record['name'] for record in start['observed']}
+    for path in sorted(observed.iterdir()):
+        if path.name not in expected_names:
+            raise store_steps.FenceBreach('only pinned members', 'only pinned members', str(path))
+    for record in start['observed']:
+        path = observed / record['name']
+        expected = {key: record[key] for key in ('size', 'sha256')}
+        if _restore_file_stat(path) is None or _file_record(path) != expected:
+            raise store_steps.FenceBreach(expected, expected, str(path))
+    if start['mode'] == 'readable':
+        digest = hashlib.sha256(_canonical_restore(start['payload'])).hexdigest()
+        if digest != start['payload_sha256']:
+            raise store_steps.FenceBreach(start['payload_sha256'], start['payload_sha256'], 'payload')
+
+
+def _restore_fence_live(source, start, *, allow_prepared):
+    states = {}
+    for name in _RESTORE_CATALOGUE:
+        path = source.parent / name
+        if _restore_file_stat(path) is not None:
+            states[name] = _file_record(path)
+    expected = {row['name']: {key: row[key] for key in ('size', 'sha256')} for row in start['observed']}
+    if allow_prepared and states == {source.name: start['prepared']}:
+        return True
+    if states == expected:
+        return False
+    if allow_prepared and states.get(source.name) == start['prepared']:
+        expected = {source.name: start['prepared']}
+    name = next(name for name in _RESTORE_CATALOGUE if states.get(name) != expected.get(name))
+    raise store_steps.FenceBreach(expected, start['prepared'], str(source.parent / name))
+
+
+def _stop_sequence(conn):
+    row = _rows(conn, "SELECT seq FROM sqlite_sequence WHERE name='engine_stop_events'")
+    return row[0][0] if row else 0
+
+
+def _restore_carry(journal, staged, payload):
+    from relay_engine import catalogue, errors
+
+    intent, done = _journal_record(journal, 'restore-carry', lambda target: target == 'machine.sqlite3')
+    if done is not None:
+        return
+    ident = (journal.intent('restore-carry', 'machine.sqlite3', 'backup-stops', 'live-stops')
+             if intent is None else intent.id)
+    with closing(store_layout.open_catalogue(staged)) as cat, cat:
+        cat.execute('BEGIN IMMEDIATE').close()
+        sequence = max(_stop_sequence(cat), payload['sequence'])
+        keep = {route.project_id for route in store_layout.project_routes(cat)}
+        rows = [row for row in payload['stops'] if row[2] is None or row[2] in keep]
+        stop_ids = {row[0] for row in rows}
+        cat.execute('DROP TABLE engine_stop_events').close()
+        cat.execute('DROP TABLE engine_stops').close()
+        for statement in catalogue._TABLES:
+            tokens = statement.split()
+            object_name = tokens[3] if tokens[1] == 'UNIQUE' else tokens[2]
+            if object_name in _STOP_OBJECTS:
+                cat.execute(statement).close()
+        cat.executemany('INSERT INTO engine_stops VALUES (?,?,?,?,?,?,?)', rows).close()
+        cat.executemany('INSERT INTO engine_stop_events VALUES (?,?,?,?,?)',
+                        [row for row in payload['events'] if row[1] in stop_ids]).close()
+        cat.execute("DELETE FROM sqlite_sequence WHERE name='engine_stop_events'").close()
+        cat.execute("INSERT INTO sqlite_sequence VALUES('engine_stop_events',?)", (sequence,)).close()
+        cat.execute("DELETE FROM queue_highwaters WHERE project_id IS NULL AND source='stop_events'").close()
+        cat.executemany('INSERT INTO queue_highwaters VALUES (?,?,?,?,?)', payload['cursor']).close()
+        try:
+            catalogue._require_matching(cat)
+        except errors.EngineError as exc:
+            if exc.code != 'E-SCHEMA-MISMATCH':
+                raise
+            raise store_steps.FenceBreach('matching catalogue schema', 'matching catalogue schema',
+                                          exc.code) from exc
+        failures = _rows(cat, 'PRAGMA foreign_key_check')
+        if failures:
+            raise store_steps.FenceBreach('foreign keys valid', 'foreign keys valid', failures)
+    journal.receipt(ident, 'live-stops')
+
+
+def _restore_excluded(staged, payload):
+    with closing(_offline_read(store_layout.catalogue_path(staged))) as cat:
+        restored = {route.project_id for route in store_layout.project_routes(cat)}
+    absent = {row[2] for row in payload['stops'] if row[2] is not None and row[2] not in restored}
+    return [row['name'] for row in payload['routes'] if row['project_id'] in absent]
+
+
+def _restore_lost_members(journal, root, job_path, members):
+    lost = job_path / 'lost'
+    _restore_parents(lost / 'unused', job_path, missing=True)
+    store_evidence._mkdir(lost)
+    for member in members:
+        name = member['name']
+        source, target = root / name, lost / name
+        binding = dict(member, src=str(source), dst=str(target))
+        intent, done = _journal_record(journal, 'restore-lost-move', lambda value: value.get('name') == name)
+        if intent is not None and intent.target != binding:
+            raise store_steps.FenceBreach(binding, binding, intent.target)
+        if done is not None:
+            continue
+        ident = (journal.intent('restore-lost-move', binding, 'at-source', 'at-destination')
+                 if intent is None else intent.id)
+        at_source, at_target = _restore_file_stat(source), _restore_file_stat(target)
+        expected = (member['dev'], member['ino'], member['size'])
+        digest = {key: member[key] for key in ('size', 'sha256')}
+        if at_source is not None and at_target is None and at_source[:3] == expected and _file_record(source) == digest:
+            if os.path.lexists(target):
+                raise store_steps.FenceBreach('destination absent', 'destination absent', str(target))
+            os.rename(source, target)
+        elif (at_source is not None or at_target is None or at_target[:3] != expected
+              or _file_record(target) != digest):
+            raise store_steps.FenceBreach('bound lost member at source', 'bound lost member at destination', name)
+        store_evidence._sync_dir(lost)
+        store_evidence._sync_dir(root)
+        journal.receipt(ident, 'at-destination')
+
+
+def _restore_record_lost_stop(journal, root, stopped_by):
+    intent, done = _journal_record(journal, 'restore-lost-stop', lambda value: value == 'store')
+    if done is not None:
+        return
+    ident = (journal.intent('restore-lost-stop', 'store', 'unobserved', {'stopped_by': stopped_by})
+             if intent is None else intent.id)
+    by = stopped_by if intent is None else intent.after['stopped_by']
+    with closing(store_layout.open_catalogue(root)) as cat, cat:
+        cat.execute('BEGIN IMMEDIATE').close()
+        if not _rows(cat, "SELECT row_id FROM engine_stops WHERE scope='store' AND ended_at IS NULL"):
+            store_layout.record_stop(cat, 'store', None, by)
+    journal.receipt(ident, 'stopped')
 
 
 def _restore_member(name):
@@ -509,7 +898,11 @@ def _restore_classes(staged):
 
 
 def _journal_record(journal, step, matches):
-    rows = _rows(journal._conn, 'SELECT i.id,i.target,i.before_state,i.after_state,r.observed'
+    return _journal_record_view(journal._conn, step, matches)
+
+
+def _journal_record_view(conn, step, matches):
+    rows = _rows(conn, 'SELECT i.id,i.target,i.before_state,i.after_state,r.observed'
                  ' FROM intents i LEFT JOIN receipts r ON r.intent_id=i.id WHERE i.step=?',
                  (step,))
     found = []
@@ -587,22 +980,19 @@ def _moved_job(path, old_id, restored):
         return MovedJob(job_id, data['project_name'], tuple(dict.fromkeys(marked)), 'journal') if marked else None
 
 
-def _restore_report(root, staged, manifest, store_id, classes):
+def _restore_report(root, staged, manifest, store_id, classes, start):
     with closing(_offline_read(store_layout.catalogue_path(staged))) as cat:
         routes = store_layout.project_routes(cat)
         pending = pending_creations(cat)
     restored = {route.project_id: route.state for route in routes}
     by_project = {route.project_id: route for route in routes}
-    live = False
-    old_id = manifest['store_id']
-    try:
-        with closing(_offline_read(store_layout.catalogue_path(root))) as cat:
-            old_id = _rows(cat, 'SELECT store_id FROM catalogue_identity WHERE id=1')[0][0]
-            live = True
-            for route in store_layout.project_routes(cat):
-                by_project.setdefault(route.project_id, route)
-    except (sqlite3.Error, ValueError, OSError, store_layout.LayoutFault):
-        pass
+    live = start['mode'] == 'readable'
+    old_id = start.get('live_store_id', manifest['store_id'])
+    if live:
+        for row in start['payload']['routes']:
+            project = row['project_id']
+            by_project.setdefault(project, store_layout.ProjectRoute(
+                project, row['name'], row['state'], store_layout.ledger_path(root, project)))
     losses = [_loss(root, route, manifest['now_ms'], live)
               for route in sorted(by_project.values(), key=lambda item: item.name)]
     moved = []
@@ -630,9 +1020,9 @@ def _restore_report(root, staged, manifest, store_id, classes):
                 being_created=[project for project in pending if project not in held])
 
 
-def _restore_current_files(root):
+def _restore_current_files(root, *, include_catalogue=True):
     members = []
-    if os.path.lexists(store_layout.catalogue_path(root)):
+    if include_catalogue:
         members.append('machine.sqlite3')
     projects = root / 'projects'
     if projects.is_dir() and not projects.is_symlink():
@@ -647,11 +1037,18 @@ def _restore_current_files(root):
                     if path.is_symlink() or path.is_file():
                         members.append(path.relative_to(root).as_posix())
     for name in members:
-        _ordinary_file(root / _restore_member(name), root)
+        if name != 'machine.sqlite3':
+            _ordinary_file(root / _restore_member(name), root)
     return members
 
 
-def _restore_move(journal, root, source, target, database):
+def _require_empty_catalogue_slots(root):
+    for slot in _RESTORE_CATALOGUE:
+        if os.path.lexists(root / slot):
+            raise store_steps.FenceBreach('absent slot', 'absent slot', str(root / slot))
+
+
+def _restore_move(journal, root, source, target, database, *, live_start=None, lost_install=False):
     binding = {'src': str(source), 'dst': str(target)}
     intent, moved = _journal_record(journal, 'move', lambda value: value == binding)
     if moved is not None:
@@ -659,15 +1056,23 @@ def _restore_move(journal, root, source, target, database):
     _restore_parents(source, root)
     _restore_parents(target, root, missing=True)
     if intent is not None:
+        if lost_install and os.path.lexists(source):
+            _require_empty_catalogue_slots(root)
         store_steps.resume_move(journal, intent)
         return
 
     prep, proof = _journal_record(journal, 'restore-prepare', lambda value: value == binding)
     if proof is None:
+        already_prepared = (live_start is not None
+                            and _restore_fence_live(source, live_start, allow_prepared=prep is not None))
         ident = journal.intent('restore-prepare', binding, 'unprepared', 'prepared') if prep is None else prep.id
         _ordinary_file(source, root)
-        if database:
+        if already_prepared:
+            prepared = store_steps.Prepared(**live_start['prepared'])
+        elif database:
             prepared = store_steps.prepare_database(source)
+            if live_start is not None and vars(prepared) != live_start['prepared']:
+                raise store_steps.FenceBreach(live_start['prepared'], live_start['prepared'], str(source))
         else:
             with source.open('rb') as file:
                 store_evidence._sync_file(file)
@@ -675,11 +1080,13 @@ def _restore_move(journal, root, source, target, database):
         journal.receipt(ident, vars(prepared))
     else:
         prepared = store_steps.Prepared(**proof)
+    if lost_install:
+        _require_empty_catalogue_slots(root)
     store_steps.move_database(journal, prepared, source, target)
 
 
 def restore(root, backup_dir, recovery_job_id: str, *, serving_stopped: bool,
-            confirm: bool, now_ms: int) -> RestoreReport:
+            confirm: bool, now_ms: int, stopped_by: str = 'restore') -> RestoreReport:
     """Restore through the journaled swap; reconciliation and serving stay outside."""
     from relay_engine import submit
 
@@ -688,31 +1095,46 @@ def restore(root, backup_dir, recovery_job_id: str, *, serving_stopped: bool,
     if type(now_ms) is not int or now_ms < 0:
         raise ValueError('restore requires Unix epoch milliseconds')
     root = store_layout.resolve_root(root)
+    job_id = store_layout._canonical_job(recovery_job_id)
     directory = Path(backup_dir).absolute()
     digest, manifest = _verified_backup(directory)
-    pending_path = root / 'recovery' / store_layout._canonical_job(recovery_job_id) / 'job.sqlite3'
-    _restore_parents(pending_path, root, missing=True)
-    if os.path.lexists(pending_path):
-        _ordinary_file(pending_path, root)
-    job_path = store_steps.recovery_dir(root, recovery_job_id)
+    job_path = root / 'recovery' / job_id
+    pending, _ = _probe_restore(root, job_path)
+    if 'restore-start' not in pending:
+        try:
+            with jobs_lock(root):
+                pending, _ = _probe_restore(root, job_path)
+                if 'restore-start' not in pending:
+                    other = next((job for job in open_restores(root) if job != job_id), None)
+                    if other is not None:
+                        raise RestoreRefused('job-open', other)
+                    job_path = store_steps.recovery_dir(root, job_id)
+                    with closing(store_steps.open_journal(job_path, create=True)) as journal:
+                        observation = _restore_observation(root, job_path)
+                        journal.checkpoint('restore-start', dict(
+                            backup=str(directory), sha256=digest, store_id=submit.new_uuid7(now_ms),
+                            now_ms=now_ms, job_id=job_id, **observation))
+        except JobsBusy as exc:
+            raise RestoreRefused('jobs-busy', None) from exc
+        except JobsLockError as exc:
+            raise RestoreRefused('jobs-lock-error', exc.errno_name) from exc
+
+    pending, last = _probe_restore(root, job_path)
+    start = pending['restore-start']
+    if start.get('job_id') != job_id or _abandoned(job_id, pending, last):
+        raise RestoreRefused('job-open', job_id)
+    if (start['backup'], start['sha256']) != (str(directory), digest):
+        raise RestoreRefused('backup-mismatch', 'recovery job already binds a different backup')
+    _restore_verify_observation(job_path, start)
+    readable = start['mode'] == 'readable'
     staged, replaced = job_path / 'store', job_path / 'replaced'
-    with closing(store_steps.open_journal(job_path, create=True)) as journal:
-        checkpoints = {}
-        for phase, raw in _rows(journal._conn, 'SELECT phase,data FROM checkpoints ORDER BY id'):
-            if phase in checkpoints:
-                raise ValueError(f'duplicate restore checkpoint: {phase}')
-            checkpoints[phase] = json.loads(raw)
+    with closing(store_steps.open_journal(job_path)) as journal:
+        checkpoints = _restore_checkpoints(journal._conn)
 
         def checkpoint(phase, data):
             journal.checkpoint(phase, data)
             checkpoints[phase] = data
 
-        if 'restore-start' not in checkpoints:
-            checkpoint('restore-start', dict(backup=str(directory), sha256=digest,
-                                             store_id=submit.new_uuid7(now_ms), now_ms=now_ms))
-        start = checkpoints['restore-start']
-        if (start['backup'], start['sha256']) != (str(directory), digest):
-            raise RestoreRefused('backup-mismatch', 'recovery job already binds a different backup')
         if 'restore-staged' not in checkpoints:
             _restore_stage(directory, staged, manifest, start['store_id'], start['now_ms'])
             checkpoint('restore-staged', True)
@@ -720,21 +1142,34 @@ def restore(root, backup_dir, recovery_job_id: str, *, serving_stopped: bool,
             checkpoint('restore-classes', _restore_classes(staged))
         classes = checkpoints['restore-classes']
         if 'restore-report' not in checkpoints:
-            _cancel_staged(journal, staged, classes, recovery_job_id, start['now_ms'])
-            checkpoint('restore-report', _restore_report(root, staged, manifest, start['store_id'], classes))
+            _cancel_staged(journal, staged, classes, job_id, start['now_ms'])
+            if readable:
+                _restore_carry(journal, staged, start['payload'])
+                if 'restore-excluded' not in checkpoints:
+                    checkpoint('restore-excluded', _restore_excluded(staged, start['payload']))
+            checkpoint('restore-report', _restore_report(root, staged, manifest, start['store_id'], classes, start))
         report = checkpoints['restore-report']
-        if confirm and 'restore-swapped' not in checkpoints:
-            if 'restore-swap' not in checkpoints:
-                checkpoint('restore-swap', _restore_current_files(root))
-            for name in checkpoints['restore-swap']:
-                relative = _restore_member(name)
-                _restore_move(journal, root, root / relative, replaced / relative,
-                              len(relative.parts) in (1, 3))
-            for name in sorted(manifest['files'], key=lambda value: (value == 'machine.sqlite3', value)):
-                relative = _restore_member(name)
-                _restore_move(journal, root, staged / relative, root / relative,
-                              len(relative.parts) in (1, 3))
-            checkpoint('restore-swapped', True)
+        if confirm and 'restore-done' not in checkpoints:
+            if 'restore-swapped' not in checkpoints:
+                if 'restore-swap' not in checkpoints:
+                    checkpoint('restore-swap', _restore_current_files(root, include_catalogue=readable))
+                if not readable:
+                    _restore_lost_members(journal, root, job_path, start['lost_members'])
+                for name in checkpoints['restore-swap']:
+                    relative = _restore_member(name)
+                    _restore_move(journal, root, root / relative, replaced / relative,
+                                  len(relative.parts) in (1, 3),
+                                  live_start=start if name == 'machine.sqlite3' else None)
+                for name in sorted(manifest['files'], key=lambda value: (value == 'machine.sqlite3', value)):
+                    relative = _restore_member(name)
+                    source, target = staged / relative, root / relative
+                    _restore_move(journal, root, source, target, len(relative.parts) in (1, 3),
+                                  lost_install=not readable and name == 'machine.sqlite3')
+                checkpoint('restore-swapped', True)
+            if not readable:
+                _restore_record_lost_stop(journal, root, stopped_by)
+            checkpoint('restore-done', True)
         return RestoreReport(report['new_store_id'], tuple(RestoreLoss(**row) for row in report['losses']),
                              [MovedJob(row['job_id'], row['project_name'], tuple(row['marked_roots']), row['state'])
-                              for row in report['moved_jobs']], tuple(report['held']), tuple(report['being_created']))
+                              for row in report['moved_jobs']], tuple(report['held']), tuple(report['being_created']),
+                             start['mode'], tuple(checkpoints.get('restore-excluded', ())))
