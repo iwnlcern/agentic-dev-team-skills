@@ -1081,7 +1081,7 @@ class LinuxFixture(FixtureRepo):
 
 
 class ImageResolution(unittest.TestCase):
-    TAG = "adt-release-check:5ac9796fa9ca"
+    TAG = rc.image_tag()
     IMAGE = "sha256:" + "a" * 64
     OTHER = "sha256:" + "b" * 64
     THIRD = "sha256:" + "c" * 64
