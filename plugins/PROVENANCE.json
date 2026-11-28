@@ -596,7 +596,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adt-operator-check",
-    "sha256": "b660a3165a896bd00009f809914c0cb84876a5d60ff9e5c209b1fe9b845b479f",
+    "sha256": "2efc7c849fa6dd9196b6c58be3a2be3d739dbab19290a65506b6fe378280456b",
     "source": "tools/adt-operator-check"
   },
   {
@@ -11804,7 +11804,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adt-operator-check",
-    "sha256": "b660a3165a896bd00009f809914c0cb84876a5d60ff9e5c209b1fe9b845b479f",
+    "sha256": "2efc7c849fa6dd9196b6c58be3a2be3d739dbab19290a65506b6fe378280456b",
     "source": "tools/adt-operator-check"
   },
   {
@@ -22928,7 +22928,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adt-operator-check",
-    "sha256": "b660a3165a896bd00009f809914c0cb84876a5d60ff9e5c209b1fe9b845b479f",
+    "sha256": "2efc7c849fa6dd9196b6c58be3a2be3d739dbab19290a65506b6fe378280456b",
     "source": "tools/adt-operator-check"
   },
   {

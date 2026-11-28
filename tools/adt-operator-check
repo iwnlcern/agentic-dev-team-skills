@@ -7,7 +7,7 @@ from typing import NamedTuple
 
 PURPOSES = (
     'engine_stop', 'engine_start', 'project_stop', 'project_start',
-    'restore', 'mirror_recovery', 'adopt_restored', 'abandonment',
+    'restore', 'adopt_restored', 'abandonment',
     'new_folder_pass', 'answer_5d', 'report_confirmation',
     'authority.set_reapproval', 'authority.release_restore',
     'authority.assign_reviewer', 'authority.unbind_branch',
