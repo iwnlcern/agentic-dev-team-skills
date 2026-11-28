@@ -286,6 +286,7 @@ class _NotifierCustodian:
                 [*command, str(receiver), str(child.fileno()), epoch],
                 pass_fds=(receiver, child.fileno()), close_fds=True, start_new_session=True,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.spawned_at = time.monotonic()
         except BaseException:
             self._channel.close()
             raise
@@ -293,16 +294,45 @@ class _NotifierCustodian:
             child.close()
         self._gate = gate
 
-    def acknowledge(self):
-        self._channel.socket.settimeout(2)
+    def acknowledge(self, deadline, stopping):
+        expected = {'epoch': self._epoch, 'kind': 'ready', 'gate': self._read_identity}
+        frame = bytearray()
+        sock = self._channel.socket
         try:
-            expected = {'epoch': self._epoch, 'kind': 'ready', 'gate': self._read_identity}
-            self._disabled = self._channel.receive() != expected
+            while not stopping() and (left := deadline - time.monotonic()) > 0:
+                try:
+                    readable, _, _ = select.select([sock], [], [], min(0.05, left))
+                except InterruptedError:
+                    continue
+                if stopping() or time.monotonic() >= deadline:
+                    break
+                if not readable:
+                    continue
+                try:
+                    data = sock.recv(65537 - len(frame), socket.MSG_DONTWAIT)
+                except (BlockingIOError, InterruptedError):
+                    continue
+                if not data:
+                    break
+                frame.extend(data)
+                newline = frame.find(b'\n')
+                if newline < 0:
+                    if len(frame) == 65537:
+                        break
+                    continue
+                if newline >= 65536 or newline != len(frame) - 1:
+                    break
+                if json.loads(frame) != expected:
+                    break
+                if not stopping() and time.monotonic() < deadline:
+                    self._disabled = False
+                    return True
+                break
         except (OSError, ValueError):
-            self._disabled = True
-        finally:
-            self._channel.socket.settimeout(None)
-        return not self._disabled
+            pass
+        if not stopping():
+            print('adt engine serve: notifier issue capability unavailable', file=sys.stderr, flush=True)
+        return False
 
     def offer(self, note, argv):
         if self._disabled or self._ticket is not None:
@@ -394,8 +424,6 @@ def _queue_notifier(terminal_notifier, service):
             print('adt engine serve: notifier issue capability unavailable', file=sys.stderr, flush=True)
             return
         service._notifier_custodian = custodian
-        if not custodian.acknowledge():
-            print('adt engine serve: notifier issue capability unavailable', file=sys.stderr, flush=True)
     finally:
         os.close(receiver)
 

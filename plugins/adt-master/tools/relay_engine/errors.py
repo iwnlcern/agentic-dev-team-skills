@@ -400,6 +400,8 @@ _SUBMIT_TEXT = {
     "error-submission-key-reused-cause": "this sender party already used the submission key for different draft bytes",
     "error-submission-key-reused-remedy": "retry the original bytes with this key, or use a new key for a new submission",
     "error-submission-key-reused-explain": "a sender party and submission key identify one exact full input and its original admission receipt",
+    "error-parent-unknown-foreign-cause": "line {line}: PARENT {value} names no relay you received from that project",
+    "error-parent-unknown-foreign-explain": "PARENT may name a relay you received from the named project",
     "error-parent-unknown-cause": "line {line}: PARENT {value} names no relay in this project",
     "error-parent-unknown-remedy": "name a handle or UUID of a relay in this project; the parent-candidates query lists the relays you may name",
     "error-parent-unknown-explain": "PARENT names a relay of the sender's own project",
@@ -418,6 +420,8 @@ _SUBMIT_TEXT = {
     "error-parent-not-member-cause": "line {line}: PARENT {value} was neither addressed to you (TO or CC) nor written by you",
     "error-parent-not-member-remedy": "name a relay addressed to you or written by you; if the grant you need is not among them, ask for it again and name the answer",
     "error-parent-not-member-explain": "a reply joins only a lineage its seat took part in",
+    "error-answers-unknown-foreign-cause": "line {line}: ANSWERS {value} names no relay you received from that project",
+    "error-answers-unknown-foreign-explain": "ANSWERS may name a relay you received from the named project",
     "error-answers-unknown-cause": "line {line}: ANSWERS {value} names no relay in this project",
     "error-answers-unknown-remedy": "name a handle or UUID of a relay in this project that was sent to you",
     "error-answers-unknown-explain": "ANSWERS names relays of the sender's own project",
@@ -867,6 +871,12 @@ ERRORS = {
 }
 
 ERROR_VARIANTS = {
+    ("E-PARENT-UNKNOWN", "foreign"): ErrorSpec(
+        "error-parent-unknown-foreign-cause", "error-parent-unknown-remedy",
+        "error-parent-unknown-foreign-explain", "integrity"),
+    ("E-ANSWERS-UNKNOWN", "foreign"): ErrorSpec(
+        "error-answers-unknown-foreign-cause", "error-answers-unknown-remedy",
+        "error-answers-unknown-foreign-explain", "integrity"),
     ("E-ADMISSION-UNKNOWN", "commit-unconfirmed"): ErrorSpec(
         "error-admission-unknown-commit-unconfirmed-cause", "error-admission-unknown-remedy",
         "error-admission-unknown-explain", "integrity"),

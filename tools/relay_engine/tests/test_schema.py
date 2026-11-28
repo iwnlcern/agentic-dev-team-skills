@@ -19,7 +19,7 @@ from relay_engine.tests.test_claims import ClaimStore
 from relay_engine import claims
 
 
-TABLES = {"restore_cancels", "restore_refusals", "slips", "slip_events", "branch_bindings", "reviewer_assignments", "verification_requests", "waivers", "relays", "bodies", "recipients", "edges", "git_states", "findings",
+TABLES = {"restore_cancels", "restore_refusals", "slips", "slip_events", "branch_bindings", "reviewer_assignments", "verification_requests", "waivers", "relays", "bodies", "recipients", "edges", "foreign_edges", "git_states", "findings",
           "finding_events", "bundles", "refusals", "seat_activity",
           "seat_sessions", "token_counts", "snapshots", "schema_version", "projects", "repositories",
           "repository_checkouts", "team_instances", "seats", "seat_occupants", "project_settings", "settings_history", "mutation_receipts",
@@ -27,7 +27,7 @@ TABLES = {"restore_cancels", "restore_refusals", "slips", "slip_events", "branch
           "evidence_objects", "evidence_object_bundles", "evidence_bundles",
           "evidence_captures", "evidence_uploads", "evidence_retention",
           "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays",
-          "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events",
+          "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events", "xproject_notices",
           "cross_project_allows", "cross_project_decisions", "cross_project_outcomes"}
 
 INDEXES = {
@@ -36,6 +36,7 @@ INDEXES = {
     "relays": {("parent_id",), ("bundle_id",), ("project_id", "handle"),
                ("sender_seat_id", "kind"), ("project_id", "id")},
     "recipients": {("seat_id",), ("relay_id",)},
+    "foreign_edges": {("source_project_id", "target_relay_id")},
     "edges": {("from_relay_id",), ("target_relay_id",),
               ("target_repository_id", "target_path"), ("target_path",)},
     "findings": {("bundle_id", "status"), ("raised_in",), ("resolved_in",)},
@@ -43,7 +44,7 @@ INDEXES = {
     "refusals": {("project_id", "code")},
     "seat_sessions": {("seat_id",)},
     "token_counts": {("bundle_id",)},
-    "xproject_transfers": {("receiver_project_id", "state")},
+    "xproject_transfers": {("receiver_project_id", "state"), ("receiver_project_id", "admit_seq")},
 }
 
 SHA = "a" * 64
@@ -452,6 +453,20 @@ class TestTask4Waiver(ClaimStore):
 
 
 class TestShape(Store):
+    def test_foreign_edges_fixed(self):
+        conn = self.connect()
+        self.relay(conn, "reply", 1)
+        row = ("reply", "parent", 1, "elsewhere", "remote-id", 7, "#7@remote")
+        conn.execute("INSERT INTO foreign_edges VALUES (?, ?, ?, ?, ?, ?, ?)", row)
+        self.refused(conn, "UPDATE foreign_edges SET target_handle=8")
+        self.refused(conn, "DELETE FROM foreign_edges")
+        self.assertEqual(conn.execute("SELECT * FROM foreign_edges").fetchall(), [row])
+        self.assertEqual({name for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='foreign_edges'")},
+            {"foreign_edges_no_update", "foreign_edges_no_delete"})
+        self.assertEqual(conn.execute("PRAGMA foreign_key_list(foreign_edges)").fetchall(),
+                         [(0, 0, "relays", "relay_id", "id", "NO ACTION", "NO ACTION", "NONE")])
+
     def test_tables_are_strict(self):
         conn = self.connect()
         rows = conn.execute(TABLES_QUERY).fetchall()
@@ -503,7 +518,7 @@ class TestShape(Store):
         stored = {name for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(stored, named)
-        self.assertEqual(len(named), 31)
+        self.assertEqual(len(named), 33)
 
 
 class TestChecks(Store):
@@ -1135,13 +1150,14 @@ class TestTableOwners(Store):
         actual = {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(set(schema.TABLE_OWNERS), actual)
+        self.assertEqual(schema.TABLE_OWNERS["foreign_edges"], "engine")
         platform = {"projects", "repositories", "repository_checkouts", "team_instances",
                     "seats", "seat_occupants", "seat_sessions", "mutation_receipts"}
         store = {"evidence_objects", "evidence_object_bundles", "evidence_bundles",
                  "evidence_captures", "evidence_uploads", "evidence_retention",
                  "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays",
-                 "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events"}
-        self.assertEqual(len(actual), 50)
+                 "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events", "xproject_notices"}
+        self.assertEqual(len(actual), 52)
         authority = {"reviewer_assignments", "verification_requests", "waivers",
                      "slips", "slip_events", "branch_bindings", "restore_cancels", "restore_refusals",
                      "cross_project_allows", "cross_project_decisions", "cross_project_outcomes"}

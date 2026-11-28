@@ -2515,3 +2515,893 @@ class StoppedReadTests(GuardedWriterFixture):
                 self.assertEqual(stop.result(3), 'not_recorded')
             self.assertIn(P, self.writer.served_projects())
             self.assertEqual(read(self.read_set(), lambda _: 73), 73)
+
+
+class TransferModeTests(ProjectWriterFixture):
+    def transfer(self, writer, run, sender=P):
+        submit_transfer = writer.submit_transfer
+        return submit_transfer(api_writer.TransferJob(sender, run))
+
+    def write(self, turn, value='after'):
+        turn.open_sender_writes()
+        self.change(turn.sender, value)
+        return api_writer.JobOutcome(True, value)
+
+    def probe_write(self, turn):
+        turn.catalogue.execute("INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, 'probe', 'active', 1)",
+                               ('cccccccc-cccc-4ccc-8ccc-cccccccccccc',)).close()
+
+    def test_transfer_commits_only_the_sender(self):
+        writer = self.writer_pair()
+        trace = []
+        def run(turn):
+            with closing(turn.catalogue.execute('SELECT count(*) FROM project_routes')) as cursor:
+                self.assertEqual(cursor.fetchone(), (2,))
+            self.assertEqual(turn.read_receiver(Q, 'optional', self.read_name), 'before')
+            return self.write(turn)
+
+        submit_transfer = writer.submit_transfer
+        run_transfer = writer._run_transfer
+
+        def traced(request):
+            writer._catalogue.set_trace_callback(trace.append)
+            try:
+                return run_transfer(request)
+            finally:
+                writer._catalogue.set_trace_callback(None)
+
+        with mock.patch.object(writer, '_run_transfer', side_effect=traced):
+            self.assertTrue(submit_transfer(api_writer.TransferJob(P, run)).commit)
+        self.assertEqual(self.value(), 'after')
+        self.assertEqual(writer.read(Q, self.read_name), 'before')
+        self.assertIn('ROLLBACK', trace)
+        self.assertNotIn('COMMIT', trace)
+
+    @staticmethod
+    def read_name(conn):
+        with closing(conn.execute('SELECT name FROM projects')) as cursor:
+            return cursor.fetchone()[0]
+
+    def test_catalogue_write_through_the_proxy_is_refused(self):
+        writer = self.writer()
+        def run(turn):
+            with self.assertRaises(sqlite3.DatabaseError) as caught:
+                self.probe_write(turn)
+            self.assertEqual(caught.exception.sqlite_errorname, 'SQLITE_AUTH')
+            return self.write(turn)
+
+        self.assertEqual(self.transfer(writer, run), api_writer.JobOutcome(False, None, False, 'turn_violation'))
+        self.assertEqual(self.value(), 'before')
+
+    def test_catalogue_query_only_is_the_second_layer(self):
+        writer = self.writer()
+        # Lookup the submit method first so the baseline error pins it.
+        submit_transfer = writer.submit_transfer
+        real = writer._transfer_authorizer
+        def factory(turn, label):
+            return (lambda *_: sqlite3.SQLITE_OK) if label == 'catalogue' else real(turn, label)
+
+        def run(turn):
+            with self.assertRaises(sqlite3.DatabaseError) as caught:
+                self.probe_write(turn)
+            self.assertEqual(caught.exception.sqlite_errorname, 'SQLITE_READONLY')
+            return api_writer.JobOutcome(False, None)
+
+        with mock.patch.object(writer, '_transfer_authorizer', side_effect=factory):
+            self.assertFalse(submit_transfer(api_writer.TransferJob(P, run)).commit)
+        self.assertEqual(writer.read_catalogue(
+            lambda conn: conn.execute('SELECT count(*) FROM project_routes').fetchone()[0]), 1)
+
+    def optional(self, case):
+        writer = self.writer() if case == 'project_not_served' else self.writer_pair()
+        calls = []
+        def read(conn):
+            calls.append(conn)
+            raise sqlite3.OperationalError('injected read fault')
+
+        def run(turn):
+            self.assertEqual(turn.read_receiver(Q, 'optional', read), api_writer.ReceiverUnavailable(Q, case))
+            if case == 'read_error':
+                q = writer._connections[Q]
+                self.assertFalse(q.in_transaction)
+                self.assertEqual(q.execute('PRAGMA query_only').fetchone(), (0,))
+            return self.write(turn)
+
+        if case == 'layout_fault':
+            real = writer._check_binding
+
+            def check(label, binding):
+                if label == Q:
+                    raise store_layout.LayoutFault('member-changed')
+                return real(label, binding)
+
+            with mock.patch.object(writer, '_check_binding', side_effect=check):
+                self.assertTrue(self.transfer(writer, run).commit)
+        else:
+            self.assertTrue(self.transfer(writer, run).commit)
+        self.assertEqual(len(calls), int(case == 'read_error'))
+        if case == 'read_error':
+            self.assertIn(Q, writer.served_projects())
+        self.assertEqual(self.value(), 'after')
+
+    def test_optional_receiver_not_served_is_isolated(self):
+        self.optional('project_not_served')
+
+    def test_optional_receiver_read_error_is_isolated(self):
+        self.optional('read_error')
+
+    def test_optional_receiver_layout_fault_is_isolated(self):
+        self.optional('layout_fault')
+
+    def test_required_receiver_failure_is_sticky(self):
+        writer = self.writer()
+        failures = []
+        def run(turn):
+            with self.assertRaises(api_writer.ReceiverRequired) as caught:
+                turn.read_receiver(Q, 'required', self.read_name)
+            failures.append(caught.exception)
+            return self.write(turn)
+
+        result = self.transfer(writer, run)
+        self.assertEqual(result, api_writer.JobOutcome(False, failures[0], False, 'receiver_required'))
+        self.assertEqual((failures[0].project_id, failures[0].reason), (Q, 'project_not_served'))
+        self.assertEqual(self.value(), 'before')
+
+    def stopped_receiver(self, fail_close):
+        # Exercise the real guarded stopped route rather than patching the router.
+        GuardedWriterFixture.setUp(self)
+        writer = self.writer
+        GuardedWriterFixture.admit_second(self)
+        writer.open_project(Q)
+        self.assertEqual(writer.request_project_stop(Q, 'fixture'), 'stopped')
+        self.flush(writer)
+        handles = []
+        requests = []
+        error = OSError('injected transient close failure')
+        guarded_open = writer._open_guarded
+        close = writer._close_handle
+
+        def open_guarded(project, *, purpose, **options):
+            conn, members = guarded_open(project, purpose=purpose, **options)
+            self.assertEqual((project, purpose), (Q, 'stopped_read'))
+            handles.append(conn)
+            return conn, members
+
+        def close_handle(conn):
+            if fail_close and handles and conn is handles[0]:
+                close(conn)
+                raise error
+            return close(conn)
+
+        def run(turn):
+            requests.append(writer._active_request)
+            self.assertEqual(turn.read_receiver(Q, 'required', self.read_name, route='stopped'), 'second')
+            return self.write(turn)
+
+        submit_transfer = writer.submit_transfer
+        run_transfer = writer._run_transfer
+
+        def check_closed(request):
+            outcome = run_transfer(request)
+            with self.assertRaisesRegex(sqlite3.ProgrammingError, 'closed database'):
+                handles[0].execute('SELECT 1')
+            return outcome
+
+        with (mock.patch.object(writer, '_open_guarded', side_effect=open_guarded),
+              mock.patch.object(writer, '_close_handle', side_effect=close_handle),
+              mock.patch.object(writer, '_run_transfer', side_effect=check_closed)):
+            self.assertTrue(submit_transfer(api_writer.TransferJob(P, run)).commit)
+        self.assertEqual(len(handles), 1)
+        self.assertIsNone(requests[0].transient)
+        if fail_close:
+            self.assertIs(writer._rollback_errors[Q], error)
+        self.assertEqual(self.value(), 'after')
+
+    def test_required_stopped_route_reads_and_closes_transient(self):
+        self.stopped_receiver(False)
+
+    def test_transient_close_failure_is_isolated(self):
+        self.stopped_receiver(True)
+
+    def stopped_guard_snapshot_case(self, case):
+        GuardedWriterFixture.setUp(self)
+        writer = self.writer
+        GuardedWriterFixture.admit_second(self)
+        writer.open_project(Q)
+        self.assertEqual(writer.request_project_stop(Q, 'fixture'), 'stopped')
+        self.flush(writer)
+        self.assertIn(P, writer.served_projects())
+        self.assertNotIn(Q, writer.served_projects())
+        before = self.value()
+        catalogue_path = store_layout.catalogue_path(self.root)
+
+        def change_blocker(present):
+            with closing(sqlite3.connect(catalogue_path)) as conn, conn:
+                if case == 'cleared_store_stop':
+                    if present:
+                        store_layout.record_stop(conn, 'store', None, 'fixture')
+                    else:
+                        store_layout.record_start(conn, 'store', None, 'fixture')
+                elif present:
+                    conn.execute("INSERT INTO maintenance_holds VALUES ('fixture', 'job', 'cutover', 1)").close()
+                else:
+                    conn.execute("DELETE FROM maintenance_holds WHERE scope='fixture'").close()
+
+        if case != 'late_hold':
+            change_blocker(True)
+
+        pin = getattr(writer, '_pin_transfer_catalogue', None)
+        pinned_guard = getattr(writer, '_require_transfer_stopped_snapshot', None)
+        runtime = self.guard.runtime_admission
+        authorizer = writer._transfer_authorizer
+        run_transfer = writer._run_transfer
+        guard_calls, pinned_causes, handles = [], [], []
+        authorised, observed, ran, live, closed = [], [], [], [], []
+
+        def pin_and_interleave(pinned_conn):
+            pin(pinned_conn)
+            if case == 'late_hold':
+                change_blocker(True)
+
+        def after_begin(phase):
+            if phase == 'began' and case != 'late_hold':
+                change_blocker(False)
+
+        def authorizer_factory(turn, label):
+            authorised.append(label)
+            return authorizer(turn, label)
+
+        def snapshot_check(pinned_conn, project):
+            try:
+                return pinned_guard(pinned_conn, project)
+            except store_layout.LayoutFault as error:
+                pinned_causes.append(error.cause)
+                raise
+
+        def check_private(arm, project, conn, *, purpose):
+            handles.append(conn)
+            common = (project, purpose, conn is writer._catalogue,
+                      writer._catalogue.in_transaction, 'catalogue' in authorised)
+            try:
+                runtime(arm, project, conn, purpose=purpose)
+            except store_layout.LayoutFault as error:
+                guard_calls.append((*common, error.cause))
+                raise
+            else:
+                guard_calls.append((*common, None))
+
+        def read(conn):
+            ran.append(self.read_name(conn))
+            return ran[-1]
+
+        def run(turn):
+            try:
+                turn.read_receiver(Q, 'required', read, route='stopped')
+            except api_writer.ReceiverRequired as error:
+                observed.append(error)
+            for conn in handles:
+                try:
+                    conn.execute('SELECT 1').close()
+                except sqlite3.ProgrammingError as error:
+                    live.append(str(error))
+                else:
+                    live.append(True)
+            return self.write(turn)
+
+        def close_witness(request):
+            outcome = run_transfer(request)
+            for conn in handles:
+                try:
+                    conn.execute('SELECT 1').close()
+                except sqlite3.ProgrammingError as error:
+                    closed.append(str(error))
+                else:
+                    closed.append(False)
+            return outcome
+
+        with (mock.patch.object(writer, '_pin_transfer_catalogue', side_effect=pin_and_interleave, create=True),
+              mock.patch.object(writer, '_require_transfer_stopped_snapshot', side_effect=snapshot_check, create=True),
+              mock.patch.object(writer, '_phase_hook', side_effect=after_begin),
+              mock.patch.object(writer, '_transfer_authorizer', side_effect=authorizer_factory),
+              mock.patch.object(self.guard, 'runtime_admission', side_effect=check_private),
+              mock.patch.object(writer, '_run_transfer', side_effect=close_witness)):
+            outcome = self.transfer(writer, run)
+        self.assertEqual(ran, [], 'stopped receiver callback ran despite the catalogue blocker')
+        prefix = (Q, 'stopped_read', False, True, True)
+        if case == 'late_hold':
+            self.assertEqual(guard_calls, [(*prefix, 'incumbent-hold')])
+            self.assertEqual(pinned_causes, [])
+        else:
+            self.assertEqual(guard_calls, [(*prefix, None)] * 3)
+            self.assertEqual(pinned_causes, ['incumbent-hold'])
+        self.assertEqual(len({id(conn) for conn in handles}), 1)
+        self.assertEqual(live, [True] * len(handles))
+        self.assertEqual(closed, ['Cannot operate on a closed database.'] * len(handles))
+        self.assertEqual(len(observed), 1)
+        self.assertEqual((observed[0].project_id, observed[0].reason), (Q, 'layout_fault'))
+        self.assertEqual(outcome, api_writer.JobOutcome(False, observed[0], False, 'receiver_required'))
+        self.assertEqual(self.value(), before)
+
+    def test_stopped_route_guard_sees_a_hold_after_the_turn_snapshot(self):
+        self.stopped_guard_snapshot_case('late_hold')
+
+    def test_stopped_route_refuses_a_blocker_cleared_after_the_turn_snapshot(self):
+        for case in ('cleared_hold', 'cleared_store_stop'):
+            with self.subTest(case=case):
+                self.stopped_guard_snapshot_case(case)
+
+    def test_receiver_naming_the_sender_is_refused(self):
+        writer = self.writer()
+        def run(turn):
+            try:
+                turn.read_receiver(P, 'required', self.read_name)
+            finally:
+                self.assertIsNone(writer._active_request.receiver)
+
+        with self.assertRaises(api_writer.UndeclaredFile):
+            self.transfer(writer, run)
+        self.assertEqual(self.value(), 'before')
+
+    def test_second_read_of_one_receiver_is_refused(self):
+        writer = self.writer_pair()
+        def run(turn):
+            self.assertEqual(turn.read_receiver(Q, 'optional', self.read_name), 'before')
+            return turn.read_receiver(Q, 'optional', self.read_name)
+
+        with self.assertRaises(api_writer.UndeclaredFile):
+            self.transfer(writer, run)
+
+    def test_sender_writes_refused_in_the_receiver_phase(self):
+        writer = self.writer()
+        def run(turn):
+            for sql in ("INSERT INTO projects (id, name, created_at) VALUES ('extra', 'extra', 1)",
+                        'CREATE TABLE blocked (x)'):
+                with self.subTest(sql=sql):
+                    with self.assertRaises(sqlite3.DatabaseError) as caught:
+                        turn.sender.execute(sql).close()
+                    self.assertEqual(caught.exception.sqlite_errorname, 'SQLITE_AUTH')
+            return self.write(turn)
+
+        self.assertEqual(self.transfer(writer, run).fault, 'turn_violation')
+        self.assertEqual(self.value(), 'before')
+        self.assertIsNone(writer.read(P, lambda conn: conn.execute(
+            "SELECT name FROM sqlite_schema WHERE name='blocked'").fetchone()))
+
+    def test_receiver_read_after_open_is_refused(self):
+        writer = self.writer_pair()
+        def run(turn):
+            self.write(turn)
+            turn.read_receiver(Q, 'optional', self.read_name)
+
+        submit_transfer = writer.submit_transfer
+        with self.assertRaises(api_writer.ReceiverAfterWrite):
+            submit_transfer(api_writer.TransferJob(P, run))
+        self.assertEqual(self.value(), 'before')
+
+    def test_transaction_control_is_refused(self):
+        writer = self.writer()
+
+        def seed(conn):
+            conn.execute('CREATE TABLE transfer_witness (statement TEXT NOT NULL)').close()
+            return api_writer.JobOutcome(True, None)
+
+        self.assertTrue(writer.submit(P, self.job(seed)).commit)
+
+        def snapshot():
+            with closing(sqlite3.connect(store_layout.ledger_path(self.root, P))) as conn:
+                with closing(conn.execute('SELECT statement FROM transfer_witness ORDER BY rowid')) as rows:
+                    values = rows.fetchall()
+                with closing(conn.execute('PRAGMA user_version')) as rows:
+                    return values, rows.fetchone()[0]
+
+        def check(phase, target, sql):
+            recorded = []
+
+            def run(turn):
+                if phase == 'write':
+                    turn.open_sender_writes()
+                try:
+                    getattr(turn, target).execute(sql).close()
+                except sqlite3.Error as error:
+                    name = error.sqlite_errorname
+                else:
+                    name = 'ok'
+                recorded.append((name, writer._connections[P].in_transaction, writer._catalogue.in_transaction))
+                if phase == 'receiver':
+                    turn.open_sender_writes()
+                turn.sender.execute('INSERT INTO transfer_witness VALUES (?)', (sql,)).close()
+                return api_writer.JobOutcome(True, None)
+
+            before = snapshot()
+            outcome = self.transfer(writer, run)
+            after = snapshot()
+            with self.subTest(phase=phase, target=target, sql=sql, observation='authorizer'):
+                self.assertEqual([item[0] for item in recorded], ['SQLITE_AUTH'])
+            with self.subTest(phase=phase, target=target, sql=sql, observation='transactions'):
+                self.assertEqual([item[1:] for item in recorded], [(True, True)])
+                self.assertEqual(outcome, api_writer.JobOutcome(False, None, False, 'turn_violation'))
+            with self.subTest(phase=phase, target=target, sql=sql, observation='durable'):
+                self.assertEqual(after, before)
+
+        basic = ('COMMIT', 'ROLLBACK', 'BEGIN', 'PRAGMA query_only=OFF', 'PRAGMA optimize',
+                 "ATTACH ':memory:' AS other")
+        for phase in ('receiver', 'write'):
+            for sql in basic + (('PRAGMA user_version=7',) if phase == 'write' else ()):
+                check(phase, 'sender', sql)
+            check(phase, 'catalogue', 'COMMIT')
+
+    def guard_writer(self):
+        writer = self.writer()
+
+        def seed(conn):
+            conn.execute('CREATE TABLE guard_witness (value TEXT NOT NULL)').close()
+            return api_writer.JobOutcome(True, None)
+
+        self.assertTrue(writer.submit(P, self.job(seed)).commit)
+        return writer
+
+    def guard_rows(self):
+        path = store_layout.ledger_path(self.root, P)
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as conn:
+            with closing(conn.execute('SELECT value FROM guard_witness ORDER BY rowid')) as cursor:
+                return cursor.fetchall()
+
+    @staticmethod
+    def guard_insert(conn, value):
+        conn.execute('INSERT INTO guard_witness VALUES (?)', (value,)).close()
+
+    @staticmethod
+    def deny_guard_insert(action, table, *_):
+        if action == sqlite3.SQLITE_INSERT and table == 'guard_witness':
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    @staticmethod
+    def guard_status(fn):
+        try:
+            fn()
+        except sqlite3.Error as error:
+            return error.sqlite_errorname
+        return 'ok'
+
+    def test_turn_guard_cannot_lift_the_writer_policy(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def run(turn):
+            with turn.sender.guard(lambda *_: sqlite3.SQLITE_OK):
+                seen.append(self.guard_status(lambda: self.guard_insert(turn.sender, 'blocked')))
+                seen.append(self.guard_status(lambda: turn.sender.execute('COMMIT').close()))
+            return api_writer.JobOutcome(False, None)
+
+        outcome = self.transfer(writer, run)
+        self.assertEqual(seen, ['SQLITE_AUTH', 'SQLITE_AUTH'])
+        self.assertEqual(outcome.fault, 'turn_violation')
+        self.assertEqual(self.guard_rows(), [])
+
+    def test_turn_guard_restores_writer_policy_after_a_raise(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def deny_read(action, *_):
+            return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ else sqlite3.SQLITE_OK
+
+        def run(turn):
+            def select():
+                turn.sender.execute('SELECT value FROM guard_witness').close()
+
+            def guarded_select():
+                with turn.sender.guard(deny_read):
+                    select()
+
+            seen.append(self.guard_status(guarded_select))
+            seen.append(self.guard_status(select))
+            seen.append(self.guard_status(lambda: turn.sender.execute('COMMIT').close()))
+            return api_writer.JobOutcome(False, None)
+
+        outcome = self.transfer(writer, run)
+        self.assertEqual(seen, ['SQLITE_AUTH', 'ok', 'SQLITE_AUTH'])
+        self.assertEqual(outcome.fault, 'turn_violation')
+
+    def test_open_sender_writes_inside_a_guard_keeps_the_guard(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def run(turn):
+            with turn.sender.guard(self.deny_guard_insert):
+                turn.open_sender_writes()
+                seen.append(self.guard_status(lambda: self.guard_insert(turn.sender, 'blocked')))
+                self.change(turn.sender, 'updated')
+            self.guard_insert(turn.sender, 'allowed')
+            return api_writer.JobOutcome(True, None)
+
+        outcome = self.transfer(writer, run)
+        self.assertEqual(seen, ['SQLITE_AUTH'])
+        self.assertEqual(outcome, api_writer.JobOutcome(True, None))
+        self.assertEqual(self.value(), 'updated')
+        self.assertEqual(self.guard_rows(), [('allowed',)])
+
+    def test_inner_guard_replaces_the_outer_layer(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def run(turn):
+            turn.open_sender_writes()
+            with turn.sender.guard(self.deny_guard_insert):
+                seen.append(self.guard_status(lambda: self.guard_insert(turn.sender, 'outer before')))
+                with turn.sender.guard(None):
+                    seen.append(self.guard_status(lambda: self.guard_insert(turn.sender, 'inner')))
+                seen.append(self.guard_status(lambda: self.guard_insert(turn.sender, 'outer after')))
+            return api_writer.JobOutcome(True, None)
+
+        outcome = self.transfer(writer, run)
+        self.assertEqual(seen, ['SQLITE_AUTH', 'ok', 'SQLITE_AUTH'])
+        self.assertEqual(outcome, api_writer.JobOutcome(True, None))
+        self.assertEqual(self.guard_rows(), [('inner',)])
+
+    def test_engine_layer_deny_does_not_mark_the_turn(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def run(turn):
+            turn.open_sender_writes()
+            turn.sender.execute('SAVEPOINT s').close()
+            self.guard_insert(turn.sender, 'partial')
+            with turn.sender.guard(self.deny_guard_insert):
+                seen.append(self.guard_status(lambda: self.guard_insert(turn.sender, 'denied')))
+                turn.sender.execute('ROLLBACK TO s').close()
+                turn.sender.execute('RELEASE s').close()
+            self.guard_insert(turn.sender, 'recorded refusal')
+            return api_writer.JobOutcome(True, None)
+
+        outcome = self.transfer(writer, run)
+        self.assertEqual(seen, ['SQLITE_AUTH'])
+        self.assertEqual(outcome, api_writer.JobOutcome(True, None))
+        self.assertEqual(self.guard_rows(), [('recorded refusal',)])
+
+    def test_turn_guard_progress_aborts_and_clears(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def run(turn):
+            def select():
+                with closing(turn.sender.execute('SELECT 1')) as cursor:
+                    return cursor.fetchone()
+            with turn.sender.guard(None, progress=lambda: 1):
+                try:
+                    select()
+                except sqlite3.OperationalError as error:
+                    seen.append((error.sqlite_errorname, str(error)))
+                else:
+                    seen.append('not interrupted')
+            seen.append(select())
+            return api_writer.JobOutcome(False, None)
+
+        self.transfer(writer, run)
+        self.assertEqual(seen, [('SQLITE_INTERRUPT', 'interrupted'), (1,)])
+
+    def test_transfer_turn_admits_named_savepoints(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def run(turn):
+            turn.open_sender_writes()
+            statements = (
+                lambda: turn.sender.execute('SAVEPOINT s').close(),
+                lambda: self.guard_insert(turn.sender, 'rolled back'),
+                lambda: turn.sender.execute('ROLLBACK TO s').close(),
+                lambda: turn.sender.execute('RELEASE s').close(),
+                lambda: self.guard_insert(turn.sender, 'committed'),
+            )
+            for statement in statements:
+                seen.append(self.guard_status(statement))
+                if seen[-1] != 'ok':
+                    break
+            return api_writer.JobOutcome(True, None)
+
+        outcome = self.transfer(writer, run)
+        self.assertEqual(seen, ['ok'] * 5)
+        self.assertEqual(outcome, api_writer.JobOutcome(True, None))
+        self.assertEqual(self.guard_rows(), [('committed',)])
+
+    def test_transfer_turn_refuses_plain_transaction_control_inside_a_savepoint(self):
+        writer = self.guard_writer()
+        for sql in ('END', 'ROLLBACK', 'COMMIT'):
+            with self.subTest(sql=sql):
+                seen = []
+
+                def run(turn, sql=sql):
+                    turn.open_sender_writes()
+                    turn.sender.execute('SAVEPOINT s').close()
+                    self.guard_insert(turn.sender, sql)
+                    seen.append(self.guard_status(lambda: turn.sender.execute(sql).close()))
+                    return api_writer.JobOutcome(True, None)
+
+                before = self.guard_rows()
+                outcome = self.transfer(writer, run)
+                self.assertEqual(seen, ['SQLITE_AUTH'])
+                self.assertEqual(outcome, api_writer.JobOutcome(False, None, False, 'turn_violation'))
+                self.assertEqual(self.guard_rows(), before)
+
+    def test_turn_connection_in_transaction_and_closed_guard(self):
+        writer = self.guard_writer()
+        retained = []
+
+        def run(turn):
+            retained.append((turn.sender, turn.sender.in_transaction))
+            return api_writer.JobOutcome(False, None)
+
+        self.transfer(writer, run)
+        sender, active = retained[0]
+        self.assertIs(active, True)
+        with self.assertRaises(api_writer.TurnClosed):
+            _ = sender.in_transaction
+        with self.assertRaises(api_writer.TurnClosed):
+            with sender.guard(None):
+                self.fail('closed guard entered')
+
+    def test_cached_sender_statement_is_refused(self):
+        writer = self.writer()
+        sql = "INSERT INTO projects (id, name, created_at) VALUES ('cached', 'extra', 1)"
+
+        def cache(conn):
+            conn.execute(sql).close()
+            return api_writer.JobOutcome(False, None)
+
+        writer.submit(P, self.job(cache))
+
+        def run(turn):
+            with self.assertRaisesRegex(sqlite3.DatabaseError, 'not authorized'):
+                turn.sender.execute(sql).close()
+            return api_writer.JobOutcome(False, None)
+
+        self.assertEqual(self.transfer(writer, run).fault, 'turn_violation')
+        self.assertEqual(self.value(), 'before')
+
+    def test_turn_exposes_no_raw_connection(self):
+        writer = self.writer_pair()
+        retained = []
+        def inspect(proxy):
+            for name in ('commit', 'rollback', 'close', 'cursor', 'set_authorizer', 'interrupt'):
+                self.assertFalse(hasattr(proxy, name), name)
+            with closing(proxy.execute('SELECT 1')) as cursor:
+                self.assertFalse(hasattr(cursor, 'connection'))
+                self.assertEqual(cursor.fetchone(), (1,))
+            retained.append(proxy)
+
+        def run(turn):
+            inspect(turn.sender)
+            turn.read_receiver(Q, 'optional', inspect)
+            with self.assertRaises(api_writer.TurnClosed):
+                retained[1].execute('SELECT 1')
+            return self.write(turn)
+
+        self.assertTrue(self.transfer(writer, run).commit)
+        with self.assertRaises(api_writer.TurnClosed):
+            retained[0].execute('SELECT 1')
+
+    def test_engine_lost_transaction_is_indeterminate(self):
+        writer = self.writer_pair()
+        def run(turn):
+            conn = writer._connections[P]  # Engine fault outside the proxy.
+            conn.set_authorizer(None)
+            conn.rollback()
+            turn.read_receiver(Q, 'optional', self.read_name)
+
+        result = self.transfer(writer, run)
+        self.assertEqual((result.commit, result.indeterminate, result.fault),
+                         (False, True, 'job_ended_transaction'))
+        self.assertIsInstance(result.value, api_writer.TransferTransactionEnded)
+
+    def test_indeterminate_outcome_publishes_nothing(self):
+        writer = self.writer()
+        def run(turn):
+            self.write(turn)
+            return api_writer.JobOutcome(True, 'value', True)
+
+        self.transfer(writer, run)
+        self.assertEqual(self.value(), 'before')
+
+    def test_commit_requires_open_sender_writes(self):
+        writer = self.writer()
+        result = self.transfer(writer, lambda turn: api_writer.JobOutcome(True, 'value'))
+        self.assertEqual(result, api_writer.JobOutcome(False, 'value', False, 'sender_not_opened'))
+        self.assertEqual(self.value(), 'before')
+
+    def test_optional_stopped_route_is_refused(self):
+        writer = self.writer_pair()
+        with self.assertRaises(api_writer.UndeclaredFile):
+            self.transfer(writer, lambda t: t.read_receiver(Q, 'optional', self.read_name, route='stopped'))
+
+    def test_unserved_sender_is_refused_before_queueing(self):
+        writer = self.writer(opened=False)
+        self.assert_unavailable(lambda: self.transfer(writer, lambda _: self.fail('callback ran')),
+                                'project_not_served')
+
+    def test_queued_transfer_withdrawn_by_sender_stop(self):
+        writer = self.writer_pair()
+        submit_transfer = writer.submit_transfer
+        parked, release, queued = (threading.Event() for _ in range(3))
+        def block(conn):
+            parked.set()
+            self.assertTrue(release.wait(3))
+            return api_writer.JobOutcome(False, None)
+
+        with self.pool(3, release) as pool:
+            first = pool.submit(writer.submit, Q, self.job(block, Q))
+            self.assertTrue(parked.wait(2))
+            writer._phase_hook = lambda phase: queued.set() if phase == 'queued' else None
+            pending = pool.submit(submit_transfer, api_writer.TransferJob(P, lambda _: self.fail('callback ran')))
+            self.assertTrue(queued.wait(2))
+            stopping = pool.submit(writer.request_project_stop, P, 'fixture')
+            self.assert_unavailable(lambda: pending.result(2), 'project_not_served')
+            release.set()
+            first.result(2)
+            self.assertEqual(stopping.result(2), 'stopped')
+
+    def stop_case(self, case):
+        import time
+        from types import SimpleNamespace
+
+        writer = self.writer_pair()
+        submit_transfer = writer.submit_transfer
+        parked, release, interrupted = (threading.Event() for _ in range(3))
+        epoch = SimpleNamespace(attempt=None, admission_closed=False)
+        writer._epoch = epoch
+        actual_interrupt = writer._interrupt
+        requests, sites, ran, facts = [], [], [], []
+
+        def interruption(conns):
+            if case in ('active', 'idle'):
+                self.assertIn(writer._connections[Q], conns)
+            actual_interrupt(conns)
+            interrupted.set()
+
+        def park():
+            parked.set()
+            self.assertTrue(release.wait(3))
+
+        def read(conn):
+            ran.append(True)
+            if case == 'active':
+                raw = writer._connections[Q]
+                def progress():
+                    park()
+                    return 0
+                raw.set_progress_handler(progress, 10)
+                try:
+                    conn.execute('WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<100000)'
+                                 ' SELECT sum(x) FROM n').fetchone()
+                finally:
+                    raw.set_progress_handler(None, 0)
+                self.fail('active receiver query not interrupted')
+            if case == 'idle':
+                park()
+            value = self.read_name(conn)
+            facts.append(value)
+            return value
+
+        def run(turn):
+            requests.append(writer._active_request)
+            if case == 'unpublished':
+                park()
+            if case != 'committing':
+                try:
+                    turn.read_receiver(Q, 'optional', read)
+                except api_writer.WriterUnavailable as error:
+                    sites.append(('read_receiver', error.reason))
+                    raise
+            if case == 'opening':
+                park()
+            try:
+                return self.write(turn)
+            except api_writer.WriterUnavailable as error:
+                sites.append(('open_sender_writes', error.reason))
+                raise
+
+        if case == 'committing':
+            writer._phase_hook = lambda phase: park() if phase == 'commit_permitted' else None
+        with mock.patch.object(writer, '_interrupt', side_effect=interruption):
+            with self.pool(2, release) as pool:
+                pending = pool.submit(submit_transfer, api_writer.TransferJob(P, run))
+                self.assertTrue(parked.wait(2))
+                now = time.monotonic()
+                epoch.attempt = SimpleNamespace(active=now + (0.2 if case == 'committing' else 2), work=now + 3)
+                epoch.admission_closed = True
+                fence = pool.submit(writer.fence_for_stop, epoch.attempt)
+                self.assertTrue(interrupted.wait(2))
+                if case != 'committing':
+                    release.set()
+                outcome = pending.result(3)
+                release.set()
+                fence.result(3)
+        if case == 'committing':
+            self.assertEqual(outcome, api_writer.JobOutcome(False, None, True, 'stop_commit_unknown'))
+        else:
+            self.assertEqual(outcome, api_writer.JobOutcome(False, None, False, 'stop_unwritten'))
+            self.assertEqual(self.value(), 'before')
+        self.assertIsNone(requests[0].receiver)
+        if case in ('idle', 'unpublished'):
+            self.assertEqual(sites, [('read_receiver', 'stopped')])
+        if case == 'idle':
+            self.assertEqual(facts, ['before'])
+        if case == 'opening':
+            self.assertEqual(sites, [('open_sender_writes', 'stopped')])
+        if case == 'unpublished':
+            self.assertFalse(ran)
+
+    def test_stop_during_receiver_read_is_unwritten(self):
+        self.stop_case('active')
+
+    def test_stop_on_an_idle_published_handle(self):
+        self.stop_case('idle')
+
+    def test_open_sender_writes_after_a_stop(self):
+        self.stop_case('opening')
+
+    def test_stop_before_publication_runs_no_callback(self):
+        self.stop_case('unpublished')
+
+    def test_stop_while_committing_is_commit_unknown(self):
+        self.stop_case('committing')
+
+    def test_catalogue_job_after_a_transfer(self):
+        writer = self.writer()
+        def blocked(turn):
+            with self.assertRaises(sqlite3.DatabaseError):
+                self.probe_write(turn)
+            return self.write(turn)
+
+        for index, run in enumerate((self.write, lambda _: api_writer.JobOutcome(False, None), blocked)):
+            self.transfer(writer, run)
+            def write_catalogue(conns):
+                conns['catalogue'].execute('UPDATE project_routes SET name=? WHERE project_id=?',
+                                           (f'updated-{index}', P)).close()
+                return api_writer.JobOutcome(True, None)
+            self.assertTrue(writer.submit_declared(self.declared(write_catalogue)).commit)
+
+    def test_catalogue_cleanup_failure_after_commit(self):
+        writer = self.writer()
+        rollback = store_layout.rollback_declared
+        error = sqlite3.OperationalError('catalogue rollback error')
+        def fail(conns):
+            outcomes = dict(rollback(conns))
+            if 'catalogue' in conns:
+                outcomes['catalogue'] = error
+            return outcomes
+
+        with mock.patch.object(store_layout, 'rollback_declared', side_effect=fail):
+            outcome = self.transfer(writer, self.write)
+        self.assertTrue(outcome.commit)
+        self.assertEqual(outcome.fault, 'rollback_failed')
+        self.assertNotIn('catalogue', writer._bindings)
+        self.assertIs(writer._catalogue_fault, error)
+        self.assertEqual(self.value(), 'after')
+
+    def test_held_port_refuses_transfer(self):
+        port = api_writer._HeldPort(self.writer())
+        self.assert_unavailable(lambda: self.transfer(port, lambda _: self.fail('callback ran')), 'store_held')
+
+    def test_nested_transfer_is_refused(self):
+        writer = self.writer()
+        with self.assertRaises(api_writer.NestedWriterJob):
+            self.transfer(writer, lambda turn: self.transfer(writer, self.write))
+
+    def test_job_error_commits_nothing(self):
+        writer = self.writer()
+        def run(turn):
+            self.write(turn)
+            raise ValueError('job failure')
+
+        with self.assertRaisesRegex(ValueError, 'job failure'):
+            self.transfer(writer, run)
+        self.assertEqual(self.value(), 'before')
+
+    def test_non_outcome_return_is_a_type_error(self):
+        writer = self.writer()
+        def run(turn):
+            self.write(turn)
+
+        with self.assertRaises(TypeError):
+            self.transfer(writer, run)
+        self.assertEqual(self.value(), 'before')

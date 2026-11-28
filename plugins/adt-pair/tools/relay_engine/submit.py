@@ -19,7 +19,7 @@ import pwd
 import re
 import secrets
 import sqlite3
-from typing import Callable, Protocol
+from typing import Callable, ContextManager, Protocol
 
 from relay_engine import addresses
 from relay_engine import errors
@@ -331,7 +331,69 @@ def submit(conn, ctx, data):
         raise
 
 
-# Engine owns this connection's authorizer and progress-handler slots for its whole life.
+class GuardedConnection(Protocol):
+    """A connection surface that scopes Engine guards without owning the transaction."""
+
+    def execute(self, sql, parameters=()): ...
+    def executemany(self, sql, seq): ...
+
+    @property
+    def in_transaction(self) -> bool: ...
+
+    def guard(self, authorizer, progress=None) -> ContextManager[None]: ...
+
+
+class _LocalGuarded:
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self._layer = (None, None)
+
+    def execute(self, sql, parameters=()):
+        return self._conn.execute(sql, parameters)
+
+    def executemany(self, sql, seq):
+        return self._conn.executemany(sql, seq)
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._conn.in_transaction
+
+    @contextmanager
+    def guard(self, authorizer, progress=None):
+        previous = self._layer
+        self._layer = (authorizer, progress)
+        change_progress = progress is not previous[1]
+        try:
+            # Installing the authorizer invalidates cached statement permissions.
+            self._conn.set_authorizer(authorizer)
+            if change_progress:
+                self._conn.set_progress_handler(progress, 1 if progress is not None else 0)
+            yield
+        finally:
+            self._layer = previous
+            if change_progress:
+                try:
+                    self._conn.set_progress_handler(previous[1], 1 if previous[1] is not None else 0)
+                except sqlite3.Error:
+                    pass
+            try:
+                self._conn.set_authorizer(previous[0])
+            except sqlite3.Error:
+                pass
+
+
+def local_guarded(conn: sqlite3.Connection) -> GuardedConnection:
+    """Scope Engine guards on a raw local connection."""
+    return _LocalGuarded(conn)
+
+
+def _guarded(conn: sqlite3.Connection | GuardedConnection) -> GuardedConnection:
+    if isinstance(conn, sqlite3.Connection):
+        return local_guarded(conn)
+    return conn
+
+
+# On the local path Engine owns the authorizer and progress-handler slots.
 # A hook can change connection attributes, including isolation_level and autocommit,
 # whose changes outlive the submit.
 # This SQL write boundary trusts Python code in the process, including calls to
@@ -372,23 +434,18 @@ def _hook_frame(conn, ctx, name):
         if action in writes and database == "main" and table in ctx.after_admit_writes:
             return sqlite3.SQLITE_OK
         return sqlite3.SQLITE_DENY
-    _HOOK_FRAMES[conn] = (ctx, authorize)
-    try:
-        conn.set_authorizer(authorize)
+    guarded = _guarded(conn)
+
+    def progress():
         # Prepared VMs are not re-authorized; stop them after any conflict rollback.
-        conn.set_progress_handler(lambda: 0 if conn.in_transaction else 1, 1)
-        yield
+        return 0 if guarded.in_transaction else 1
+
+    _HOOK_FRAMES[conn] = (ctx, guarded, progress)
+    try:
+        with guarded.guard(authorize, progress=progress):
+            yield
     finally:
         _HOOK_FRAMES.pop(conn, None)
-        try:
-            conn.set_progress_handler(None, 0)
-        except sqlite3.Error:
-            pass
-        try:
-            conn.set_authorizer(None)
-        except sqlite3.Error:
-            pass
-
 
 
 def _run_hook(conn, ctx, admitted, draft):
@@ -484,28 +541,30 @@ def _run_sender_check(conn, ctx):
         return sqlite3.SQLITE_OK if action in reads else sqlite3.SQLITE_DENY
     _CHECK_FRAMES[conn] = ctx
     try:
-        conn.set_authorizer(authorize)
-        ctx.sender_check(conn)
-        state = _transaction_state(conn)
-        if state == "closed":
-            raise sqlite3.ProgrammingError("the sender check closed the store connection")
-        if state == "ended":
-            raise sqlite3.ProgrammingError("the sender check ended the transaction")
+        with _guarded(conn).guard(authorize):
+            ctx.sender_check(conn)
+            state = _transaction_state(conn)
+            if state == "closed":
+                raise sqlite3.ProgrammingError("the sender check closed the store connection")
+            if state == "ended":
+                raise sqlite3.ProgrammingError("the sender check ended the transaction")
     finally:
         _CHECK_FRAMES.pop(conn, None)
-        try:
-            conn.set_authorizer(None)
-        except sqlite3.Error:
-            pass
+
+
+def replay_in_snapshot(conn, ctx, data) -> Admitted | None:
+    """Check the current sender and replay key in the caller's open transaction."""
+    if not conn.in_transaction:
+        raise RuntimeError("snapshot replay requires an open transaction")
+    _run_sender_check(conn, ctx)
+    return _replay(conn, ctx, data, before_lock=True)
 
 
 def _checked_replay(conn, ctx, data):
-    """D6 step 1: the sender check, then the replay lookup on the same read
-    snapshot, in one short read transaction ended before any preparation."""
+    """D6 step 1: end the local read transaction before any preparation."""
     conn.execute("BEGIN")
     try:
-        _run_sender_check(conn, ctx)
-        return _replay(conn, ctx, data, before_lock=True)
+        return replay_in_snapshot(conn, ctx, data)
     finally:
         if _transaction_state(conn) == "active":
             conn.execute("ROLLBACK")
@@ -520,10 +579,8 @@ def file_system_relay(conn, ctx, data):
                      ctx.sender.project_id)
     internal = replace(ctx, sender=system, after_admit=None, after_rollback=None,
                        after_admit_writes=frozenset(), sender_check=None)
-    # Each real authorizer transition expires cached prepared statements.
-    # A boolean privilege flag would let cached engine INSERTs escape later.
-    conn.set_authorizer(None)
-    try:
+    _, guarded, progress = frame
+    with guarded.guard(None, progress=progress):
         conn.execute("SAVEPOINT engine_system_filing")
         try:
             admitted = _admit(conn, internal, data, ctx.now_ms(), _system=True)
@@ -534,8 +591,6 @@ def file_system_relay(conn, ctx, data):
             raise
         conn.execute("RELEASE engine_system_filing")
         return admitted
-    finally:
-        conn.set_authorizer(frame[1])
 
 
 def _refusal_row(conn, ctx, data, now, error):
@@ -780,12 +835,24 @@ def _find_relay(conn, project_id, spelling, *, before_lock: bool):
     return row
 
 
+def _local_reply_target(conn, sender, spelling, code, params, *, before_lock: bool):
+    target, qualified, project = spelling.partition("@")
+    if qualified:
+        with _busy_answer() if before_lock else nullcontext():
+            own = conn.execute("SELECT 1 FROM projects WHERE id = ? AND name = ?",
+                               (sender.project_id, project)).fetchone()
+        if own is None:
+            raise errors.error_for(code, variant="foreign", **params)
+    return _find_relay(conn, sender.project_id, target, before_lock=before_lock)
+
+
 def _answers(conn, sender, draft, lines, parent, *, before_lock: bool) -> tuple[str, ...]:
     """Resolve addressed, opened and distinct answers before taking the write lock."""
     resolved = []
     for index, spelling in enumerate(draft.answers):
         params = {"line": lines.of("ANSWERS", index), "value": header._display(spelling)}
-        row = _find_relay(conn, sender.project_id, spelling, before_lock=before_lock)
+        row = _local_reply_target(conn, sender, spelling, "E-ANSWERS-UNKNOWN", params,
+                                  before_lock=before_lock)
         if row is None:
             raise errors.error_for("E-ANSWERS-UNKNOWN", **params)
         with _busy_answer() if before_lock else nullcontext():
@@ -806,10 +873,11 @@ def _parent(conn, sender, draft, lines, *, before_lock: bool):
     if draft.parent is None:
         return None
     line = lines.of("PARENT")
-    row = _find_relay(conn, sender.project_id, draft.parent, before_lock=before_lock)
+    params = {"line": line, "value": header._display(draft.parent)}
+    row = _local_reply_target(conn, sender, draft.parent, "E-PARENT-UNKNOWN", params,
+                              before_lock=before_lock)
     if row is None:
-        raise errors.error_for("E-PARENT-UNKNOWN", line=line,
-                               value=header._display(draft.parent))
+        raise errors.error_for("E-PARENT-UNKNOWN", **params)
     with _busy_answer() if before_lock else nullcontext():
         member = conn.execute(
             "SELECT 1 FROM relays WHERE id = ? AND " + party_sql("sender_") + " = ?"

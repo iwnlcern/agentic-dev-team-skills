@@ -75,6 +75,25 @@ class TestRegistry(unittest.TestCase):
 
 
 class TestParse(Refused):
+    def test_parent_answers_accept_qualified_forms(self):
+        handle = "#12@project-1"
+        uid = "0192f3a4-5b6c-7d8e-9f01-23456789abcd@project-2"
+        for parent, answer in ((handle, uid), (uid, handle)):
+            with self.subTest(parent=parent):
+                result = header.parse(draft(replace("BUNDLE", None) + [
+                    "PARENT: " + parent, "ANSWERS: " + answer]))
+                self.assertEqual((result.parent, result.answers), (parent, (answer,)))
+
+    def test_parent_answers_refuse_malformed_qualified(self):
+        for field in ("PARENT", "ANSWERS"):
+            for item in ("#0@p", "#12@", "#12@p@q", "#12@UP", "#12@p.x",
+                         "#12@" + "p" * 33, "not-a-uuid@p"):
+                with self.subTest(field=field, item=item):
+                    lines = replace("BUNDLE", None) if field == "PARENT" else BASE
+                    error = self.refused(draft(lines + [field + ": " + item]), "E-FIELD-SHAPE")
+                    self.assertIn("#<n>@<project>", error.params["form"])
+                    self.assertIn("<uuid>@<project>", error.params["form"])
+
     def test_imported_parent_bundle_header(self):
         lines = replace("NEEDS", "review", replace("KIND", "PLAN"))
         for parent in ("#12", "0192f3a4-5b6c-7d8e-9f01-23456789abcd"):

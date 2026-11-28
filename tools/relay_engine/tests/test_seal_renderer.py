@@ -24,6 +24,15 @@ D = '30000000-0000-4000-8000-000000000003'
 R = '40000000-0000-4000-8000-000000000004'
 
 
+def _replace_final_name(source, target, directory, *, link, between=None):
+    keep = source + '.keep'
+    link(source, keep, src_dir_fd=directory, dst_dir_fd=directory)
+    os.rename(source, target, src_dir_fd=directory, dst_dir_fd=directory)
+    if between is not None:
+        between()
+    os.rename(keep, source, src_dir_fd=directory, dst_dir_fd=directory)
+
+
 def key_child(root, project, chain, pipe, rename_control=False):
     """Each child owns its service and only exposes public key ids."""
     from relay_engine import approval_seal as a, seal_files, seal_renderer, store_layout
@@ -41,9 +50,7 @@ def key_child(root, project, chain, pipe, rename_control=False):
             pipe.send('before-link'); assert pipe.recv() == 'go'
             if rename_control:
                 directory = kwargs['src_dir_fd']
-                os.rename(source, target, src_dir_fd=directory, dst_dir_fd=directory)
-                # Keep the helper's normal unlink step, after replacing the final name.
-                original(target, source, src_dir_fd=directory, dst_dir_fd=directory)
+                _replace_final_name(source, target, directory, link=original)
                 created = True
                 return
             result = original(source, target, *args, **kwargs)
@@ -1017,6 +1024,33 @@ class SealRendererTests(unittest.TestCase):
             self.assertEqual(self.clock(), 1000)
             self.assertEqual([r.chain for r in requests if r.kind == 'pass'], [C, None])
             self.assertFalse(any(r.kind == 'drain' for r in requests))
+
+    def test_replace_final_name_keeps_own_inode(self):
+        with tempfile.TemporaryDirectory() as directory_path:
+            root = Path(directory_path)
+            source, target = '.creating-1.x', '1'
+            (root / source).write_bytes(b'original')
+            own_inode = (root / source).stat().st_ino
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            sibling_inode = None
+
+            def between():
+                nonlocal sibling_inode
+                sibling = root / 'sibling'
+                sibling.write_bytes(b'sibling')
+                sibling_inode = sibling.stat().st_ino
+                os.rename('sibling', target, src_dir_fd=fd, dst_dir_fd=fd)
+
+            try:
+                _replace_final_name(source, target, fd, link=os.link, between=between)
+                with self.subTest(witness='source-inode'):
+                    self.assertEqual(os.stat(source, dir_fd=fd).st_ino, own_inode)
+                with self.subTest(witness='target-inode'):
+                    self.assertEqual(os.stat(target, dir_fd=fd).st_ino, sibling_inode)
+                with self.subTest(witness='listing'):
+                    self.assertEqual(set(os.listdir(root)), {source, target})
+            finally:
+                os.close(fd)
 
     def test_key_seq_race_two_processes(self):
         owned_processes = []

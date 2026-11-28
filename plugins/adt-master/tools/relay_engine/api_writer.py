@@ -54,10 +54,234 @@ ProjectStopResult = Literal['stopped', 'already_stopped', 'not_recorded', 'not_k
 ProjectStartResult = Literal['started', 'started_not_served', 'not_stopped', 'still_stopped', 'not_known']
 
 
+@dataclass(frozen=True)
+class TransferJob:
+    sender: str
+    run: Callable[['TransferTurn'], JobOutcome]
+
+
+class TurnClosed(Exception):
+    """The connection or cursor outlived its turn."""
+
+
+@dataclass(frozen=True)
+class ReceiverUnavailable:
+    project_id: str
+    reason: Literal['project_not_served', 'layout_fault', 'rollback_failed', 'read_error']
+
+
+class ReceiverRequired(Exception):
+    def __init__(self, project_id: str, reason: str):
+        self.project_id = project_id
+        self.reason = reason
+        super().__init__(project_id, reason)
+
+
+class ReceiverAfterWrite(Exception):
+    """A receiver cannot be read after sender writes open."""
+
+
+class TransferTransactionEnded(Exception):
+    """The writer lost a transaction belonging to this turn."""
+
+
+class TurnCursor:
+    def __init__(self, cursor, owner):
+        self._cursor = cursor
+        self._owner = owner
+
+    def fetchone(self):
+        return self._check().fetchone()
+
+    def fetchall(self):
+        return self._check().fetchall()
+
+    def fetchmany(self, size=None):
+        cursor = self._check()
+        return cursor.fetchmany() if size is None else cursor.fetchmany(size)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._check())
+
+    @property
+    def rowcount(self):
+        return self._check().rowcount
+
+    @property
+    def lastrowid(self):
+        return self._check().lastrowid
+
+    @property
+    def description(self):
+        return self._check().description
+
+    def close(self):
+        if self._cursor is not None:
+            self._cursor.close()
+            self._cursor = None
+            self._owner._cursors.discard(self)
+
+    def _check(self):
+        if self._cursor is None:
+            raise TurnClosed()
+        self._owner._check()
+        return self._cursor
+
+
+class TurnConnection:
+    def __init__(self, conn):
+        self._conn = conn
+        self._cursors = set()
+        self._writer_authorizer = None
+        self._guards = []
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._check().in_transaction
+
+    @contextmanager
+    def guard(self, authorizer, progress=None):
+        conn = self._check()
+        layer = (authorizer, progress)
+        self._guards.append(layer)
+        try:
+            self._install_guard(conn)
+            yield
+        finally:
+            # Turn cleanup may have invalidated an unclosed guard.
+            if self._guards and self._guards[-1] is layer:
+                self._guards.pop()
+                self._install_guard(conn)
+
+    def _set_writer_authorizer(self, authorizer):
+        self._writer_authorizer = authorizer
+        self._check().set_authorizer(authorizer)
+
+    def _install_guard(self, conn):
+        writer_authorizer = self._writer_authorizer
+        authorizer, progress = self._guards[-1] if self._guards else (None, None)
+        if authorizer is None:
+            conn.set_authorizer(writer_authorizer)
+        else:
+            def combined(*args):
+                decision = writer_authorizer(*args)
+                if decision == sqlite3.SQLITE_DENY:
+                    return decision
+                # An Engine-layer refusal is local to the statement.
+                return authorizer(*args)
+            conn.set_authorizer(combined)
+        conn.set_progress_handler(progress, 0 if progress is None else 1)
+
+    def _clear_guards(self):
+        if self._guards:
+            self._guards.clear()
+            self._install_guard(self._check())
+
+    def execute(self, sql, parameters=()) -> TurnCursor:
+        return self._wrap(self._check().execute(sql, parameters))
+
+    def executemany(self, sql, seq) -> TurnCursor:
+        return self._wrap(self._check().executemany(sql, seq))
+
+    def _wrap(self, cursor):
+        wrapped = TurnCursor(cursor, self)
+        self._cursors.add(wrapped)
+        return wrapped
+
+    def _check(self):
+        if self._conn is None:
+            raise TurnClosed()
+        return self._conn
+
+    def _invalidate(self):
+        try:
+            self._clear_guards()
+        finally:
+            self._conn = None
+            self._writer_authorizer = None
+            for cursor in tuple(self._cursors):
+                cursor.close()
+
+
+class TransferTurn:
+    def __init__(self, writer, request, conns):
+        self._writer = writer
+        self._request = request
+        self._conns = conns
+        self._guard_catalogues = {}
+        self._catalogue = TurnConnection(conns['catalogue'])
+        self._sender = TurnConnection(conns[request.project_id])
+        self._writes_open = False
+        self._closed = False
+        self._reading = False
+        self._receivers = set()
+        self._refusals = []
+        self._required = None
+
+    @property
+    def catalogue(self) -> TurnConnection:
+        return self._catalogue
+
+    @property
+    def sender(self) -> TurnConnection:
+        return self._sender
+
+    def read_receiver(
+        self, project_id: str, kind: Literal['required', 'optional'],
+        fn: Callable[[TurnConnection], T], *, route: Literal['served', 'stopped'] = 'served',
+    ) -> T | ReceiverUnavailable:
+        self._check_open()
+        if self._reading or project_id == self._request.project_id or project_id in self._receivers:
+            raise UndeclaredFile()
+        if self._writes_open:
+            raise ReceiverAfterWrite()
+        if any(not conn.in_transaction for conn in self._conns.values()):
+            raise TransferTransactionEnded()
+        if kind not in ('required', 'optional') or route not in ('served', 'stopped'):
+            raise UndeclaredFile()
+        if route == 'stopped' and kind != 'required':
+            raise UndeclaredFile()
+        self._receivers.add(project_id)
+        result = self._writer._transfer_read_receiver(self, project_id, fn, route)
+        if isinstance(result, ReceiverUnavailable) and kind == 'required':
+            error = ReceiverRequired(result.project_id, result.reason)
+            if self._required is None:
+                self._required = error
+            raise error
+        return result
+
+    def open_sender_writes(self) -> None:
+        self._check_open()
+        self._writer._transfer_open_sender(self)
+
+    def _check_open(self):
+        if self._closed:
+            raise TurnClosed()
+
+
+_TRANSFER_CONTROL = frozenset({
+    sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH, sqlite3.SQLITE_PRAGMA,
+})
+_TRANSFER_WRITES = frozenset({
+    sqlite3.SQLITE_CREATE_INDEX, sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_CREATE_TEMP_INDEX,
+    sqlite3.SQLITE_CREATE_TEMP_TABLE, sqlite3.SQLITE_CREATE_TEMP_TRIGGER, sqlite3.SQLITE_CREATE_TEMP_VIEW,
+    sqlite3.SQLITE_CREATE_TRIGGER, sqlite3.SQLITE_CREATE_VIEW, sqlite3.SQLITE_DELETE,
+    sqlite3.SQLITE_DROP_INDEX, sqlite3.SQLITE_DROP_TABLE, sqlite3.SQLITE_DROP_TEMP_INDEX,
+    sqlite3.SQLITE_DROP_TEMP_TABLE, sqlite3.SQLITE_DROP_TEMP_TRIGGER, sqlite3.SQLITE_DROP_TEMP_VIEW,
+    sqlite3.SQLITE_DROP_TRIGGER, sqlite3.SQLITE_DROP_VIEW, sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE,
+    sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_REINDEX, sqlite3.SQLITE_ANALYZE,
+    sqlite3.SQLITE_CREATE_VTABLE, sqlite3.SQLITE_DROP_VTABLE,
+})
+
+
 class StorePort(Protocol):
     def submit(self, project_id: str, job: WriterJob) -> JobOutcome: ...
     def submit_callee(self, project_id: str, job: CalleeJob) -> JobOutcome: ...
     def submit_declared(self, job: DeclaredJob) -> JobOutcome: ...
+    def submit_transfer(self, job: TransferJob) -> JobOutcome: ...
     def read_declared(self, declared: store_steps.Declared,
                       fn: Callable[[Mapping[str, sqlite3.Connection]], T]) -> T: ...
     def read(self, project_id: str, fn: Callable[[sqlite3.Connection], T]) -> T: ...
@@ -99,7 +323,7 @@ class _HeldPort:
     def _refuse(self, *_args, **_kwargs):
         raise WriterUnavailable('store_held')
 
-    submit = submit_callee = read = ledger_file = served_projects = _refuse
+    submit = submit_callee = submit_transfer = read = ledger_file = served_projects = _refuse
     request_project_stop = request_project_start = _refuse
 
 
@@ -151,7 +375,7 @@ def _require_identity(path, expected):
 class _Request:
     kind: str
     project_id: str | None = None
-    job: WriterJob | CalleeJob | DeclaredJob | None = None
+    job: WriterJob | CalleeJob | DeclaredJob | TransferJob | None = None
     bindings: dict[str, _FileBinding] = field(default_factory=dict)
     ready: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
@@ -163,6 +387,7 @@ class _Request:
     read_route: Literal['served', 'stopped'] | None = None
     read_catalogue: bool = False
     transient: sqlite3.Connection | None = None
+    receiver: sqlite3.Connection | None = None
 
 
 def _unavailable(reason, cause):
@@ -527,6 +752,12 @@ class StoreWriter:
                     if request.job.declared.ledgers:
                         self._require_project_startup()
                     request.bindings = self._admit_declared(request.job)
+                elif request.kind == 'transfer':
+                    project = request.project_id
+                    self._require_served(project)
+                    labels = store_layout.declared_order(True, [project])
+                    request.bindings = {labels[0]: self._require_catalogue(), labels[1]: self._bindings[project]}
+                    self._require_declared_bindings(request.bindings)
                 elif request.kind == 'read':
                     project = request.project_id
                     request.read_route = self._declared_read_route(project)
@@ -541,7 +772,7 @@ class StoreWriter:
                 self._requests[id(request)] = request
                 self._queue.put(request)
             try:
-                if request.kind in {'job', 'callee', 'declared', 'read'}:
+                if request.kind in {'job', 'callee', 'declared', 'read', 'transfer'}:
                     self._phase('queued')
             except BaseException:
                 request.withdrawn = True
@@ -575,6 +806,9 @@ class StoreWriter:
 
     def submit_declared(self, job: DeclaredJob) -> JobOutcome:
         return self._call(_Request('declared', job=job))
+
+    def submit_transfer(self, job: TransferJob) -> JobOutcome:
+        return self._call(_Request('transfer', job.sender, job))
 
     def read_declared(self, declared: store_steps.Declared,
                       fn: Callable[[Mapping[str, sqlite3.Connection]], T]) -> T:
@@ -621,7 +855,7 @@ class StoreWriter:
         for request in self._requests.values():
             if request is self._active_request or request.done.is_set():
                 continue
-            direct = request.kind in {'job', 'callee', 'open', 'read'} and request.project_id == project
+            direct = request.kind in {'job', 'callee', 'open', 'read', 'transfer'} and request.project_id == project
             declared = request.kind == 'declared' and project in request.bindings
             if direct or declared:
                 request.withdrawn = True
@@ -777,7 +1011,7 @@ class StoreWriter:
     def _publish_stop_outcome(self, request):
         if request.done.is_set():
             return
-        if request.kind in {'job', 'declared', 'callee'}:
+        if request.kind in {'job', 'declared', 'callee', 'transfer'}:
             uncertain = request.committing or request.kind == 'callee'
             fault = 'stop_commit_unknown' if uncertain else 'stop_unwritten'
             request.result = JobOutcome(False, None, uncertain, fault)
@@ -796,10 +1030,12 @@ class StoreWriter:
                     request.ready.set()
             self._request_close()
             connections = [conn for conn in self._readers.values() if conn is not None]
-            if active is not None and active.kind in {'declared', 'read'}:
+            if active is not None and active.kind in {'declared', 'read', 'transfer'}:
                 connections.extend(binding.conn for binding in active.bindings.values())
                 if active.transient is not None:
                     connections.append(active.transient)
+                if active.receiver is not None:
+                    connections.append(active.receiver)
             elif active is not None:
                 conn = self._connections.get(active.project_id)
                 if conn is not None:
@@ -887,17 +1123,23 @@ class StoreWriter:
             self._guarded_failed_close(project_id, conn, failure)
             original.add_note('cleanup close failed: ' + type(failure).__name__)
 
-    def _open_guarded(self, project_id, *, purpose):
+    def _open_guarded(self, project_id, *, purpose, guard_catalogue=None):
         guard, arm = self._store_guard, self._store_arm
         self._check_store_open()
         members = guard.runtime_members(arm, project_id, phase='initial')
-        guard.runtime_admission(arm, project_id, self._catalogue, purpose=purpose)
+
+        catalogue = self._catalogue if guard_catalogue is None else guard_catalogue
+
+        def require_admission():
+            guard.runtime_admission(arm, project_id, catalogue, purpose=purpose)
+
+        require_admission()
 
         def check():
             self._check_store_open()
             if guard.runtime_members(arm, project_id, phase='connected') != members:
                 raise store_layout.LayoutFault('member-changed')
-            guard.runtime_admission(arm, project_id, self._catalogue, purpose=purpose)
+            require_admission()
 
         def on_failed_close(conn, failure):
             self._guarded_failed_close(project_id, conn, failure)
@@ -1173,6 +1415,268 @@ class StoreWriter:
             raise _unavailable('rollback_failed', failure) from failure
         return outcome
 
+    def _transfer_authorizer(self, turn, label):
+        def authorize(action, arg1, arg2, database, trigger):
+            if action in _TRANSFER_CONTROL or (
+                    action in _TRANSFER_WRITES
+                    and (label != turn._request.project_id or not turn._writes_open)):
+                turn._refusals.append((label, action))
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        return authorize
+
+    def _require_transfer_running(self):
+        if self._stop_attempt() is not None:
+            raise WriterUnavailable('stopped')
+        self._require_running()
+
+    def _transfer_open_sender(self, turn):
+        with self._changed:
+            self._require_transfer_running()
+            if turn._writes_open or turn._reading:
+                raise UndeclaredFile()
+            label = turn._request.project_id
+            conn = turn._conns[label]
+            if not conn.in_transaction:
+                raise TransferTransactionEnded()
+            conn.set_authorizer(None)
+            try:
+                conn.execute('PRAGMA query_only=OFF').close()
+                turn._writes_open = True
+            finally:
+                turn.sender._install_guard(conn)
+
+    def _cleanup_transfer_connections(self, conns, proxy_error=None, *, reset=True):
+        failures = {} if proxy_error is None else dict(proxy_error)
+        for label, conn in conns.items():
+            try:
+                conn.set_authorizer(None)
+            except BaseException as error:
+                failures.setdefault(label, error)
+        for label, failure in store_layout.rollback_declared(conns).items():
+            failures.setdefault(label, failure)
+        if reset:
+            for label, conn in conns.items():
+                if label not in failures:
+                    try:
+                        conn.execute('PRAGMA query_only=OFF').close()
+                    except BaseException as error:
+                        failures[label] = error
+        return failures
+
+    def _finish_transfer(self, turn, original):
+        failures = {}
+        turn._closed = True
+        for label, proxy in (('catalogue', turn.catalogue), (turn._request.project_id, turn.sender)):
+            try:
+                proxy._invalidate()
+            except BaseException as error:
+                failures[label] = error
+        failures = self._cleanup_transfer_connections(turn._conns, failures)
+        for label, error in failures.items():
+            self._retire_declared_file(label, turn._conns[label], error)
+            if original is not None:
+                original.add_note(f'{label}: transfer cleanup failed: {type(error).__name__}')
+        for project, catalogue in turn._guard_catalogues.items():
+            try:
+                self._close_handle(catalogue)
+            except BaseException as error:
+                with self._changed:
+                    self._rollback_errors[project] = error
+        turn._guard_catalogues.clear()
+        return next(iter(failures.values()), None)
+
+    def _pin_transfer_catalogue(self, catalogue):
+        # A deferred BEGIN alone does not fix the WAL snapshot.
+        with closing(catalogue.execute('SELECT count(*) FROM sqlite_schema')) as cursor:
+            cursor.fetchone()
+
+    def _run_transfer(self, request):
+        self._phase('dequeued')
+        bindings = request.bindings
+        self._require_declared_bindings(bindings)
+        conns = {label: binding.conn for label, binding in bindings.items()}
+        turn = TransferTurn(self, request, conns)
+        sender = request.project_id
+        try:
+            conns['catalogue'].execute('BEGIN').close()
+            self._pin_transfer_catalogue(conns['catalogue'])
+            conns['catalogue'].execute('PRAGMA query_only=ON').close()
+            conns[sender].execute('BEGIN IMMEDIATE').close()
+            conns[sender].execute('PRAGMA query_only=ON').close()
+            turn.catalogue._set_writer_authorizer(self._transfer_authorizer(turn, 'catalogue'))
+            turn.sender._set_writer_authorizer(self._transfer_authorizer(turn, sender))
+        except BaseException as error:
+            self._finish_transfer(turn, error)
+            for label, binding in bindings.items():
+                _require_identity(self._file_path(label), binding.identity)
+            if (isinstance(error, sqlite3.OperationalError)
+                    and getattr(error, 'sqlite_errorcode', 0) & 255 == sqlite3.SQLITE_BUSY):
+                raise _unavailable('busy', error) from error
+            raise
+
+        original = None
+        outcome = None
+        try:
+            self._phase('began')
+            self._require_declared_bindings(bindings)
+            with self._changed:
+                self._require_transfer_running()
+            outcome = request.job.run(turn)
+            turn.catalogue._clear_guards()
+            turn.sender._clear_guards()
+            if not isinstance(outcome, JobOutcome):
+                raise TypeError('transfer job must return JobOutcome')
+            self._phase('finishing')
+        except BaseException as error:
+            original = error
+
+        try:
+            ended_early = any(not conn.in_transaction for conn in conns.values())
+        except sqlite3.ProgrammingError as error:
+            if original is None:
+                original = error
+            ended_early = True
+        if ended_early:
+            value = original if original is not None else outcome.value
+            failure = self._finish_transfer(turn, original)
+            return JobOutcome(False, value, True, 'rollback_failed' if failure else 'job_ended_transaction')
+
+        committed = False
+        if turn._refusals:
+            outcome = JobOutcome(False, None, False, 'turn_violation')
+            original = None
+        elif turn._required is not None:
+            outcome = JobOutcome(False, turn._required, False, 'receiver_required')
+            original = None
+        elif original is None and outcome.commit and not outcome.indeterminate:
+            if not turn._writes_open:
+                outcome = JobOutcome(False, outcome.value, False, 'sender_not_opened')
+            else:
+                try:
+                    for conn in conns.values():
+                        conn.set_authorizer(None)
+                    if self._permit_commit():
+                        conns[sender].execute('COMMIT').close()
+                        committed = True
+                    else:
+                        outcome = JobOutcome(False, None, False, 'stop_unwritten')
+                except BaseException as error:
+                    original = error
+
+        failure = self._finish_transfer(turn, original)
+        if original is not None:
+            if request.committing:
+                return JobOutcome(False, original, True, 'commit_unknown')
+            if self._stop_attempt() is not None:
+                return JobOutcome(False, None, False, 'stop_unwritten')
+            if failure is None:
+                raise original
+        if failure is not None:
+            if committed:
+                return replace(outcome, fault='rollback_failed')
+            raise _unavailable('rollback_failed', failure) from failure
+        return outcome
+
+    def _require_transfer_stopped_snapshot(self, catalogue, project):
+        if store_layout.any_hold(catalogue) is not None:
+            raise store_layout.LayoutFault('incumbent-hold')
+        stops = store_layout.open_stops(catalogue)
+        if any(stop.scope == 'store' for stop in stops):
+            raise store_layout.LayoutFault('incumbent-hold')
+        if not any(stop.scope == 'project' and stop.project_id == project for stop in stops):
+            raise store_layout.LayoutFault('member-unproved')
+
+    def _transfer_read_receiver(self, turn, project, fn, route):
+        request = turn._request
+        conn = proxy = None
+        transient = route == 'stopped'
+        callback_returned = False
+        turn._reading = True
+        try:
+            try:
+                if transient:
+                    with self._changed:
+                        self._require_transfer_running()
+                        if self._declared_read_route(project) != route:
+                            raise WriterUnavailable('project_not_served')
+                    # G-GUARD owns its transaction and sees a later snapshot
+                    # than the one pinned by this turn.
+                    try:
+                        catalogue = store_layout.open_catalogue_readonly(self._root)
+                    except (OSError, sqlite3.Error) as error:
+                        raise store_layout.LayoutFault('member-unproved') from error
+                    turn._guard_catalogues[project] = catalogue
+                    conn, members = self._open_guarded(project, purpose='stopped_read',
+                                                       guard_catalogue=catalogue)
+                    self._require_transfer_stopped_snapshot(turn._conns['catalogue'], project)
+                with self._changed:
+                    self._require_transfer_running()
+                    if self._declared_read_route(project) != route:
+                        raise WriterUnavailable('project_not_served')
+                    if transient:
+                        _require_identity(self._file_path(project), members[-1])
+                        request.transient = conn
+                    else:
+                        binding = self._bindings[project]
+                        self._check_binding(project, binding)
+                        conn = request.receiver = binding.conn
+            except store_layout.LayoutFault as error:
+                reason = 'rollback_failed' if error.cause == 'close-unresolved' else 'layout_fault'
+                return ReceiverUnavailable(project, reason)
+            except UndeclaredFile:
+                return ReceiverUnavailable(project, 'layout_fault')
+            except WriterUnavailable as error:
+                if error.reason not in ('project_not_served', 'rollback_failed'):
+                    raise
+                return ReceiverUnavailable(project, error.reason)
+
+            conn.execute('PRAGMA query_only=ON').close()
+            conn.execute('BEGIN').close()
+            proxy = TurnConnection(conn)
+            proxy._set_writer_authorizer(self._transfer_authorizer(turn, project))
+            try:
+                result = fn(proxy)
+            except sqlite3.Error:
+                if self._stop_attempt() is not None:
+                    raise
+                result = ReceiverUnavailable(project, 'read_error')
+            callback_returned = True
+            return result
+        finally:
+            try:
+                if conn is not None:
+                    self._finish_transfer_receiver(project, conn, proxy, transient)
+            finally:
+                with self._changed:
+                    if transient:
+                        request.transient = None
+                    else:
+                        request.receiver = None
+                    turn._reading = False
+                    if callback_returned and self._stop_attempt() is not None:
+                        raise WriterUnavailable('stopped')
+
+    def _finish_transfer_receiver(self, project, conn, proxy, transient):
+        failures = {}
+        if proxy is not None:
+            try:
+                proxy._invalidate()
+            except BaseException as error:
+                failures[project] = error
+        failures = self._cleanup_transfer_connections({project: conn}, failures, reset=not transient)
+        if transient:
+            try:
+                self._close_handle(conn)
+            except BaseException as error:
+                failures.setdefault(project, error)
+            if project in failures:
+                with self._changed:
+                    self._rollback_errors[project] = failures[project]
+        elif project in failures:
+            self._retire_declared_file(project, conn, failures[project])
+
     def _read_transient(self, request):
         project = request.project_id
         try:
@@ -1290,6 +1794,8 @@ class StoreWriter:
                     self._project_stop(request.project_id)
                 elif request.kind == 'declared':
                     result = self._run_declared(request)
+                elif request.kind == 'transfer':
+                    result = self._run_transfer(request)
                 elif request.kind == 'read':
                     result = self._run_declared_read(request)
                 else:

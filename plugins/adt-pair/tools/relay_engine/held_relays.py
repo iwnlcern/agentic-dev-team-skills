@@ -46,6 +46,14 @@ class TransferKey:
     receiver_project_id: str
 
 
+@dataclass(frozen=True)
+class TransferRow:
+    relay_id: str
+    receiver_project_id: str
+    created_at: int
+    admit_seq: int
+
+
 _TERMINAL = ('delivered', 'denied', 'returned')
 
 
@@ -96,8 +104,8 @@ def admit(conn, relay_id: str, receiver_project_id: str, body_sha256: str,
     first = _next_state(decision, facts)
     conn.execute(
         'INSERT INTO xproject_transfers '
-        '(relay_id,receiver_project_id,body_sha256,state,reason,created_at,changed_at) '
-        'VALUES (?,?,?,?,?,?,?)',
+        '(relay_id,receiver_project_id,body_sha256,state,reason,created_at,changed_at,admit_seq) '
+        'VALUES (?,?,?,?,?,?,?,(SELECT COALESCE(MAX(admit_seq), 0) + 1 FROM xproject_transfers))',
         (relay_id, receiver_project_id, body_sha256, first.state, first.reason, now_ms, now_ms),
     ).close()
     conn.executemany(
@@ -165,6 +173,49 @@ def non_terminal(conn, receiver_project_id: str | None = None) -> tuple[Transfer
         parameters = (receiver_project_id,)
     with closing(conn.execute(sql + ' ORDER BY relay_id,receiver_project_id', parameters)) as cursor:
         return tuple(TransferKey(*row) for row in cursor)
+
+
+def horizon(conn) -> int:
+    with closing(conn.execute(
+        'SELECT COALESCE(MAX(admit_seq), 0) FROM xproject_transfers'
+    )) as cursor:
+        return cursor.fetchone()[0]
+
+
+def _page_bounds(limit: int, through: int) -> None:
+    if limit < 1 or through < 0:
+        raise ValueError('invalid transfer page bounds')
+
+
+def non_terminal_page(conn, receiver_project_id: str, after: int | None,
+                      limit: int, *, through: int) -> tuple[TransferRow, ...]:
+    _page_bounds(limit, through)
+    sql = (
+        'SELECT relay_id,receiver_project_id,created_at,admit_seq FROM xproject_transfers '
+        "WHERE state IN ('held', 'allowed') AND receiver_project_id=? AND admit_seq<=?"
+    )
+    parameters = (receiver_project_id, through)
+    if after is not None:
+        sql += ' AND admit_seq>?'
+        parameters += (after,)
+    with closing(conn.execute(sql + ' ORDER BY admit_seq LIMIT ?', (*parameters, limit))) as cursor:
+        return tuple(TransferRow(*row) for row in cursor)
+
+
+def pending_receivers(conn, after: str | None, limit: int, *, through: int) -> tuple[str, ...]:
+    _page_bounds(limit, through)
+    sql = (
+        'SELECT DISTINCT receiver_project_id FROM xproject_transfers '
+        "WHERE state IN ('held', 'allowed') AND admit_seq<=?"
+    )
+    parameters = (through,)
+    if after is not None:
+        sql += ' AND receiver_project_id>?'
+        parameters += (after,)
+    with closing(conn.execute(
+        sql + ' ORDER BY receiver_project_id LIMIT ?', (*parameters, limit)
+    )) as cursor:
+        return tuple(row[0] for row in cursor)
 
 
 AskKey = tuple[str, str]

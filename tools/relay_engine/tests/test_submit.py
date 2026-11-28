@@ -1451,6 +1451,60 @@ class TestAdmissionReplay(Store):
 
 
 
+class TestLocalGuard(Store):
+    def setUp(self):
+        super().setUp()
+        self.conn.execute("CREATE TEMP TABLE guard_probe (n INTEGER)")
+
+    @staticmethod
+    def deny_insert(action, table, column, database, trigger):
+        if action == sqlite3.SQLITE_INSERT and table == "guard_probe":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    def test_local_guard_restores_previous_layer_on_raise(self):
+        self.assertTrue(hasattr(submit, "local_guarded"), "local guard adapter is missing")
+        guarded = submit.local_guarded(self.conn)
+        with guarded.guard(self.deny_insert):
+            with self.assertRaisesRegex(RuntimeError, "inner block"):
+                with guarded.guard(None):
+                    raise RuntimeError("inner block")
+            with self.assertRaises(sqlite3.DatabaseError):
+                self.conn.execute("INSERT INTO guard_probe VALUES (1)")
+        self.conn.execute("INSERT INTO guard_probe VALUES (2)")
+        self.assertEqual(self.conn.execute("SELECT n FROM guard_probe").fetchall(), [(2,)])
+
+    def test_local_guard_progress_restored(self):
+        self.assertTrue(hasattr(submit, "local_guarded"), "local guard adapter is missing")
+        guarded = submit.local_guarded(self.conn)
+        calls = []
+        def progress():
+            calls.append(True)
+            return 0
+
+        with self.assertRaisesRegex(RuntimeError, "progress block"):
+            with guarded.guard(None, progress=progress):
+                self.assertEqual(guarded.execute("SELECT 1").fetchone(), (1,))
+                raise RuntimeError("progress block")
+        self.assertTrue(calls)
+        calls.clear()
+        self.assertEqual(self.conn.execute("SELECT 1").fetchone(), (1,))
+        self.assertEqual(calls, [])
+
+    def test_inner_none_guard_lifts_outer(self):
+        self.assertTrue(hasattr(submit, "local_guarded"), "local guard adapter is missing")
+        guarded = submit.local_guarded(self.conn)
+        write = "INSERT INTO guard_probe VALUES (1)"
+        with guarded.guard(self.deny_insert):
+            with self.assertRaises(sqlite3.DatabaseError):
+                self.conn.execute(write)
+            with guarded.guard(None):
+                guarded.execute(write)
+            with self.assertRaises(sqlite3.DatabaseError):
+                self.conn.execute(write)
+        self.assertEqual(self.conn.execute("SELECT n FROM guard_probe").fetchall(), [(1,)])
+
+
 class TestAdmissionHook(Store):
     """Breaks: post-commit callbacks, cached authority, partial writes and unsafe errors."""
 
@@ -1647,6 +1701,40 @@ class TestAdmissionHook(Store):
         submit.submit(self.conn, self.hook_ctx(direct, frozenset({"fixture_owned"})), draft())
         self.assertEqual(self.conn.execute("SELECT count(*) FROM fixture_owned").fetchone(), (1,))
         self.assert_free()
+
+    def test_system_filing_lift_keeps_hook_progress(self):
+        class ProgressConnection(sqlite3.Connection):
+            in_system_filing = False
+            ticks_inside_filing = 0
+
+            def set_progress_handler(conn, handler, steps):
+                def tick():
+                    conn.ticks_inside_filing += int(conn.in_system_filing)
+                    return handler()
+                return super().set_progress_handler(None if handler is None else tick, steps)
+
+        self.conn = sqlite3.connect(":memory:", factory=ProgressConnection)
+        self.addCleanup(self.conn.close)
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        schema.init_v3(self.conn)
+        platform_rows(self.conn)
+        self.conn.execute("CREATE TEMP TABLE guard_probe (n INTEGER)")
+        filed = []
+
+        def hook(c, a, d, x):
+            c.in_system_filing = True
+            try:
+                filed.append(submit.file_system_relay(c, x, draft(bundle="system")))
+            finally:
+                c.in_system_filing = False
+            with self.assertRaises(sqlite3.DatabaseError):
+                c.execute("INSERT INTO guard_probe VALUES (1)")
+
+        submit.submit(self.conn, self.hook_ctx(hook), draft())
+        self.assertEqual(len(filed), 1)
+        self.assertEqual(self.relay(filed[0].relay_id)["sender_special"], "system")
+        self.assertGreater(self.conn.ticks_inside_filing, 0)
+        self.assertEqual(self.conn.execute("SELECT n FROM guard_probe").fetchall(), [])
 
     def test_system_relay_hook_only_atomic(self):
         self.require_hook()
@@ -2288,6 +2376,63 @@ class TestSenderCheck(Store):
     def last_refusal(self):
         return self.conn.execute("SELECT project_id, coalesce(seat_id, special), code FROM refusals"
                                  " ORDER BY id DESC LIMIT 1").fetchone()
+
+    def test_replay_in_snapshot_issues_no_transaction_statement(self):
+        self.assertTrue(hasattr(submit, "replay_in_snapshot"), "snapshot replay helper is missing")
+        data = draft()
+        prior = self.submit(data, submission_key="snapshot")
+        check, calls = self.recorder()
+        ctx = self.checked(check, submission_key="snapshot")
+        trace = []
+        self.conn.execute("PRAGMA query_only=ON")
+        self.conn.execute("BEGIN")
+        try:
+            self.conn.set_trace_callback(trace.append)
+            self.assertEqual(submit.replay_in_snapshot(self.conn, ctx, data), prior)
+            self.assertTrue(self.conn.in_transaction)
+        finally:
+            self.conn.set_trace_callback(None)
+            self.conn.rollback()
+            self.conn.execute("PRAGMA query_only=OFF")
+        self.assertEqual(calls, [True])
+        self.assertTrue(any(statement.lstrip().upper().startswith("SELECT ") for statement in trace))
+        self.assertFalse({"BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"}
+                         & {statement.split()[0].upper() for statement in trace})
+
+    def test_replay_in_snapshot_answers_and_refuses(self):
+        self.assertTrue(hasattr(submit, "replay_in_snapshot"), "snapshot replay helper is missing")
+        data = draft(subject="original")
+        prior = self.submit(data, submission_key="snapshot")
+        check, calls = self.recorder(raising=(4,))
+        ctx = self.checked(check, submission_key="snapshot")
+        self.conn.execute("PRAGMA query_only=ON")
+        self.conn.execute("BEGIN")
+        try:
+            missing = replace(ctx, submission_key="missing")
+            self.assertIsNone(submit.replay_in_snapshot(self.conn, missing, data))
+            self.assertEqual(submit.replay_in_snapshot(self.conn, ctx, data), prior)
+            with self.assertRaises(errors.EngineError) as changed:
+                submit.replay_in_snapshot(self.conn, ctx, draft(subject="changed"))
+            self.assertEqual(changed.exception.code, "E-SUBMISSION-KEY-REUSED")
+            with self.assertRaises(errors.EngineError) as stale:
+                submit.replay_in_snapshot(self.conn, ctx, data)
+            self.assertEqual(stale.exception.code, "E-SENDER-NOT-CURRENT")
+            self.assertEqual(stale.exception.params["reason"], "key_replaced")
+            self.assertTrue(self.conn.in_transaction)
+        finally:
+            self.conn.rollback()
+            self.conn.execute("PRAGMA query_only=OFF")
+        self.assertEqual(calls, [True, True, True, True])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM refusals").fetchone(), (0,))
+
+    def test_replay_in_snapshot_needs_transaction(self):
+        self.assertTrue(hasattr(submit, "replay_in_snapshot"), "snapshot replay helper is missing")
+        check, calls = self.recorder()
+        self.assertFalse(self.conn.in_transaction)
+        with self.assertRaises(RuntimeError):
+            submit.replay_in_snapshot(self.conn, self.checked(check), draft())
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(calls, [])
 
     def test_sender_check_once_per_path(self):
         self.checked(None)  # the field exists, or this test errors here
@@ -4290,6 +4435,29 @@ class TestImportStep(Store):
 
 
 class TestAnswers(Store):
+    def test_local_qualified_spelling(self):
+        self.conn.execute("UPDATE projects SET name = 'local-name' WHERE id = ?", (PROJECT,))
+        self.conn.commit()
+        self.assertEqual(self.conn.execute(
+            "SELECT name FROM projects WHERE id = ?", ("q",)).fetchone(), ("q",))
+        target = self.submit(draft(to=IMPL.address))
+        answered = self.submit(draft(to=IMPL.address))
+        self._open(answered)
+        written = self.submit(self._draft((answered.relay_id + "@local-name",),
+                              parent=f"#{target.handle}@local-name"), sender=IMPL)
+        self.assertEqual(self.relay(written.relay_id)["parent_id"], target.relay_id)
+        self.assertEqual(self._marks([answered.relay_id]),
+                         [(answered.relay_id, IMPL.seat_id, written.relay_id)])
+        for field, raw in (
+                ("PARENT", draft(parent="#999999@q")),
+                ("PARENT", draft(parent=f"#{target.handle}@q")),
+                ("ANSWERS", self._draft((answered.relay_id + "@q",), parent=f"#{target.handle}"))):
+            with self.subTest(field=field):
+                code = "E-" + field + "-UNKNOWN"
+                exception = self.refused(code, raw, sender=IMPL)
+                self.assertEqual(exception.cause, errors.error_for(
+                    code, variant="foreign", **exception.params).cause)
+
     def _draft(self, answers, **kwargs):
         # Keep the existing draft helper untouched until C1 has run.
         data = draft(**kwargs)

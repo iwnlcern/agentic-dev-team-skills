@@ -171,6 +171,448 @@ class ApiServiceTests(unittest.TestCase):
                                          admission=self.admitted.receipt)
         self.addCleanup(self.service.stop)
 
+    def test_acknowledgement_runs_on_the_notify_thread_after_acknowledge_ready(self):
+        import runpy
+        from types import SimpleNamespace
+
+        events = []
+        offered = threading.Event()
+        setup = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'adt'))['_queue_notifier']
+        started = time.monotonic()
+
+        class Custodian:
+            def __init__(self, command, program, gate, receiver, stopping, epoch):
+                events.append('spawn')
+                self.program, self.spawned_at = program, started
+
+            def acknowledge(self, *args):
+                events.append(('acknowledge', threading.current_thread().name))
+                return True
+
+            def offer(self, note, argv):
+                events.append('offer')
+                offered.set()
+
+            def settled(self):
+                pass
+
+            def begin_stop(self, attempt):
+                pass
+
+            def retire(self, deadline):
+                return True
+
+        service = self.m.ApiService(str(self.root), P, clock=lambda: next(self.tick), bridge_port=0,
+                                    admission=self.admitted.receipt,
+                                    notifier_setup=lambda owner: setup(None, owner))
+        service.arm_foreground()
+        acknowledge_ready = service._foreground.acknowledge_ready
+
+        def ready():
+            events.append('ready')
+            return acknowledge_ready()
+
+        def notify_pass(port, deliver, now, *, offer, **kwargs):
+            if not offered.is_set():
+                offer(None, [])
+
+        channel, peer = socket.socketpair()
+        startup = SimpleNamespace(recheck_before_arm=lambda: None)
+        with (channel, peer, patch.dict(setup.__globals__, _NotifierCustodian=Custodian),
+              patch.object(service, '_check_startup', return_value=('isolated', (startup, channel, started + 5))),
+              patch.object(self.m.owner_start, 'witness_child_epoch', side_effect=lambda *a, **k: events.append(
+                  'witness')),
+              patch.object(service._foreground, 'acknowledge_ready', side_effect=ready),
+              patch.object(self.m.notifier, 'notify_pass', side_effect=notify_pass)):
+            try:
+                self.assertIsNotNone(service.start())
+                self.assertTrue(offered.wait(2), events)
+                self.assertEqual(events, ['spawn', 'witness', 'ready', ('acknowledge', 'adt-queue-notify'), 'offer'])
+            finally:
+                self.assertEqual(service.stop(), 0)
+
+    @contextmanager
+    def _custodian_socket(self):
+        import runpy
+        from types import SimpleNamespace
+
+        module = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'adt'))
+        cls = module['_NotifierCustodian']
+        parent, peer = socket.socketpair()
+        with parent, peer:
+            custody = cls.__new__(cls)
+            custody._disabled = True
+            custody._ticket = None
+            custody._epoch = 'ack-fixture'
+            custody._read_identity = [123, 456]
+            custody._channel = module['_Control'](parent)
+            custody._gate = SimpleNamespace(released=True)
+            custody._process = SimpleNamespace(wait=lambda timeout: 0)
+            custody.program = 'fixture'
+            custody.spawned_at = time.monotonic()
+            try:
+                yield custody, peer, b'{"epoch":"ack-fixture","kind":"ready","gate":[123,456]}\n'
+            finally:
+                custody._channel.close()
+
+    def _join_ack(self, thread):
+        thread.join(2)
+        self.assertFalse(thread.is_alive(), 'ack waiter escaped cleanup')
+
+    def test_stop_ends_acknowledgement_with_a_silent_peer(self):
+        from contextlib import redirect_stderr
+        import io
+        from types import SimpleNamespace
+
+        with self._custodian_socket() as (custody, peer, frame_ready):
+            service = self.service
+            service._foreground = SimpleNamespace(join_fencer=lambda attempt: True, notifier_gate=None,
+                                                  admission_closed=False)
+            service._notifier_custodian = custody
+            started = threading.Event()
+            result = []
+            retired = []
+            retire = custody.retire
+
+            def ack():
+                started.set()
+                result.append(custody.acknowledge(time.monotonic() + 10, service.is_stopping))
+
+            def record_retirement(deadline):
+                retired.append(not worker.is_alive())
+                return retire(deadline)
+
+            custody.retire = record_retirement
+            worker = threading.Thread(target=ack, daemon=True)
+            service._notify_thread = worker
+            diagnostics = io.StringIO()
+            with redirect_stderr(diagnostics):
+                worker.start()
+                try:
+                    self.assertTrue(started.wait(1))
+                    then = time.monotonic()
+                    service._stop_owned(SimpleNamespace(work=then + 0.95))
+                    self.assertLess(time.monotonic() - then, 1)
+                    self.assertEqual(result, [False])
+                    self.assertEqual(retired, [True])
+                    peer.settimeout(1)
+                    self.assertIn(b'"kind":"stop"', peer.recv(4096))
+                    self.assertEqual(peer.recv(1), b'')
+                    self.assertTrue(custody._disabled)
+                    self.assertEqual(diagnostics.getvalue(), '')
+                finally:
+                    if worker.is_alive():
+                        peer.sendall(frame_ready)
+                    self._join_ack(worker)
+                    service._foreground = None
+                    service._notifier_custodian = None
+                    service._notify_thread = None
+
+    def test_partial_frame_makes_progress_and_honours_stop(self):
+        from types import SimpleNamespace
+
+        with self._custodian_socket() as (custody, peer, ready):
+            calls = []
+            observed = threading.Event()
+            stopping = threading.Event()
+            result = []
+
+            def wait(*args):
+                calls.append(time.monotonic())
+                observed.set()
+                return select.select(*args)
+
+            peer.sendall(ready[:len(ready) // 2])
+            with patch.dict(custody.acknowledge.__globals__, select=SimpleNamespace(select=wait)):
+                worker = threading.Thread(target=lambda: result.append(
+                    custody.acknowledge(time.monotonic() + 4, stopping.is_set)), daemon=True)
+                worker.start()
+                try:
+                    self.assertTrue(observed.wait(1))
+                    time.sleep(1)
+                    then = time.monotonic()
+                    stopping.set()
+                    worker.join(1)
+                    self.assertFalse(worker.is_alive())
+                    self.assertLessEqual(len(calls), 40, 'partial frame stayed readable')
+                    self.assertLess(time.monotonic() - then, 1)
+                    self.assertEqual(result, [False])
+                    self.assertTrue(custody._disabled)
+                    self.assertTrue(custody.retire(time.monotonic() + 1))
+                finally:
+                    stopping.set()
+                    self._join_ack(worker)
+
+    def test_fragmented_ready_and_frame_limit(self):
+        from contextlib import redirect_stderr
+        import io
+
+        cases = ('fragments', 'at limit', 'one past', 'partial EOF', 'unterminated', 'trailing data')
+        for case in cases:
+            with self.subTest(case=case), self._custodian_socket() as (custody, peer, ready):
+                def send():
+                    if case == 'fragments':
+                        peer.sendall(ready[:8])
+                        time.sleep(0.1)
+                        peer.sendall(ready[8:19])
+                        time.sleep(0.1)
+                        peer.sendall(ready[19:])
+                    elif case in ('at limit', 'one past'):
+                        length = 65536 + (case == 'one past')
+                        peer.sendall(ready[:1] + b' ' * (length - len(ready)) + ready[1:])
+                    elif case == 'partial EOF':
+                        peer.sendall(ready[:-3])
+                        peer.shutdown(socket.SHUT_WR)
+                    elif case == 'unterminated':
+                        peer.sendall(b' ' * 65537)
+                    else:
+                        peer.sendall(ready + b'x')
+
+                writer = threading.Thread(target=send, daemon=True)
+                writer.start()
+                diagnostics = io.StringIO()
+                with redirect_stderr(diagnostics):
+                    enabled = custody.acknowledge(time.monotonic() + 2, lambda: False)
+                self._join_ack(writer)
+                expected = case in ('fragments', 'at limit')
+                self.assertIs(enabled, expected)
+                self.assertIs(custody._disabled, not expected)
+                self.assertEqual(diagnostics.getvalue().count('notifier issue capability unavailable'),
+                                 0 if expected else 1)
+                if case == 'fragments':
+                    peer.sendall(b'{"next":true}\n')
+                    self.assertEqual(custody._channel.receive(), {'next': True})
+
+    def _check_ready_after_boundary(self, boundary):
+        from contextlib import redirect_stderr
+        import io
+        from types import SimpleNamespace
+
+        from relay_engine.operator_queue.notifier import NotifierIssueUnavailable
+
+        with self._custodian_socket() as (custody, peer, ready):
+            entered = threading.Event()
+            release = threading.Event()
+            stopping = threading.Event()
+            elapsed = [0]
+            result = []
+            custody._stopping = stopping.is_set
+
+            def wait(*args):
+                entered.set()
+                if not release.wait(2):
+                    raise TimeoutError('test did not release select')
+                return select.select(*args)
+
+            diagnostics = io.StringIO()
+            with (patch.dict(custody.acknowledge.__globals__, select=SimpleNamespace(select=wait),
+                             time=SimpleNamespace(monotonic=lambda: elapsed[0])),
+                  redirect_stderr(diagnostics)):
+                worker = threading.Thread(target=lambda: result.append(custody.acknowledge(2, stopping.is_set)),
+                                          daemon=True)
+                worker.start()
+                try:
+                    self.assertTrue(entered.wait(1))
+                    if boundary == 'stop':
+                        stopping.set()
+                    else:
+                        elapsed[0] = 3
+                    peer.sendall(ready)
+                finally:
+                    release.set()
+                    self._join_ack(worker)
+                self.assertEqual(result, [False])
+                self.assertTrue(custody._disabled)
+                self.assertEqual(diagnostics.getvalue().count('notifier issue capability unavailable'),
+                                 int(boundary == 'deadline'))
+                with self.assertRaises(NotifierIssueUnavailable):
+                    custody.offer(None, [])
+                self.assertEqual(select.select([peer], [], [], 0)[0], [])
+
+    def test_stop_during_a_slice_disables_a_late_valid_ready(self):
+        self._check_ready_after_boundary('stop')
+
+    def test_valid_ready_after_the_deadline_stays_disabled(self):
+        self._check_ready_after_boundary('deadline')
+
+    def test_failed_acknowledgement_stays_disabled(self):
+        from contextlib import redirect_stderr
+        import io
+        from types import SimpleNamespace
+
+        for failure in ('mismatch', 'eof', 'unexpected'):
+            with self.subTest(failure=failure), self._custodian_socket() as (custody, peer, ready):
+                root = self.base / failure
+                admitted = admitted_store_fixture(root, P, project_name='failed acknowledgement')
+                service = self.m.ApiService(str(root), P, clock=lambda: 1, bridge_port=0,
+                                            admission=admitted.receipt)
+                service.arm_foreground()
+                service._notifier_custodian = custody
+                diagnostics = io.StringIO()
+                data = ready.replace(b'ack-fixture', b'wrong') if failure == 'mismatch' else ready
+                if failure == 'eof':
+                    peer.shutdown(socket.SHUT_WR)
+                else:
+                    peer.sendall(data)
+                breaker = RuntimeError('unexpected validator failure')
+
+                def decode(raw):
+                    if failure == 'unexpected':
+                        raise breaker
+                    return json.loads(raw)
+
+                serving = None
+                try:
+                    with (redirect_stderr(diagnostics),
+                          patch.dict(custody.acknowledge.__globals__, json=SimpleNamespace(loads=decode)),
+                          patch.object(self.m.notifier, 'notify_pass') as notify):
+                        path = service.start()
+                        self.assertIsNotNone(path)
+                        self._join_ack(service._notify_thread)
+                        notify.assert_not_called()
+                    self.assertTrue(custody._disabled)
+                    self.assertEqual(select.select([peer], [], [], 0)[0], [])
+                    self.assertEqual(diagnostics.getvalue().count('notifier issue capability unavailable'),
+                                     int(failure != 'unexpected'))
+                    self.assertIs(service._notify_error, breaker if failure == 'unexpected' else None)
+                    if failure != 'unexpected':
+                        metadata = json.loads(Path(path).read_bytes())
+                        serving = threading.Thread(target=service.serve_forever, daemon=True)
+                        serving.start()
+                        connection = Connection(metadata['socket'])
+                        try:
+                            self.assertIn('result', connection.connected)
+                        finally:
+                            connection.close()
+                finally:
+                    self.assertEqual(service.stop(), 0)
+                    if serving is not None:
+                        self._join_ack(serving)
+
+    def test_stop_and_notify_thread_admission_are_linearized(self):
+        for case in ('park', 'timeout', 'start raises'):
+            with self.subTest(case=case):
+                self._exercise_notify_admission(case, self.base / ('admit-' + case.replace(' ', '-')))
+
+    def _exercise_notify_admission(self, case, root):
+        from types import SimpleNamespace
+
+        admitted = admitted_store_fixture(root, P, project_name='admission')
+        service = self.m.ApiService(str(root), P, clock=lambda: 1, bridge_port=0, admission=admitted.receipt)
+        parked, release, stop_started, stop_done, retired = (threading.Event() for _ in range(5))
+        events, start_errors, stop_errors = [], [], []
+        fail_start = RuntimeError('fixture start failed')
+
+        def retire(deadline):
+            events.append(('retire', time.monotonic()))
+            retired.set()
+            return True
+
+        service._notifier_custodian = SimpleNamespace(
+            program='fixture', spawned_at=time.monotonic(), acknowledge=lambda *args: False,
+            begin_stop=lambda attempt: None, retire=retire)
+        real_lock = service._notify_lock
+
+        class RecordedLock:
+            def __enter__(self):
+                real_lock.acquire()
+                return self
+
+            def __exit__(self, *args):
+                events.append(('admission exit', time.monotonic()))
+                real_lock.release()
+
+            def acquire(self, *args, **kwargs):
+                return real_lock.acquire(*args, **kwargs)
+
+            def release(self):
+                real_lock.release()
+
+        service._notify_lock = RecordedLock()
+        native_start, native_join = threading.Thread.start, threading.Thread.join
+
+        def start(thread):
+            if thread.name == 'adt-queue-notify':
+                if case == 'start raises':
+                    raise fail_start
+                parked.set()
+                if not release.wait(3):
+                    raise TimeoutError('test did not release admission')
+            return native_start(thread)
+
+        def join(thread, *args, **kwargs):
+            value = native_join(thread, *args, **kwargs)
+            if thread.name == 'adt-queue-notify' and not thread.is_alive():
+                events.append(('join', time.monotonic()))
+            return value
+
+        def launch():
+            try:
+                service.start()
+            except BaseException as error:
+                start_errors.append(error)
+
+        def stop():
+            now = time.monotonic()
+            attempt = SimpleNamespace(active=now, work=now + (0.35 if case == 'timeout' else 2))
+            writer = service.writer
+            prior_epoch = writer._epoch
+            epoch = SimpleNamespace(attempt=attempt, admission_closed=True, notifier_gate=None,
+                                    join_fencer=writer.fence_for_stop)
+            service._foreground = writer._epoch = epoch
+            stop_started.set()
+            try:
+                service._stop_owned(attempt)
+            except BaseException as error:
+                stop_errors.append(error)
+            finally:
+                service._foreground = None
+                writer._epoch = prior_epoch
+                stop_done.set()
+
+        starter = threading.Thread(target=launch, daemon=True)
+        stopper = threading.Thread(target=stop, daemon=True)
+        with (patch.object(threading.Thread, 'start', start), patch.object(threading.Thread, 'join', join)):
+            try:
+                starter.start()
+                if case == 'start raises':
+                    self._join_ack(starter)
+                    self.assertEqual(start_errors, [fail_start])
+                    self.assertIsNone(service._notify_thread)
+                    service.stop()
+                    self.assertNotIn('join', [name for name, _ in events])
+                    return
+                self.assertTrue(parked.wait(2), start_errors)
+                stopper.start()
+                self.assertTrue(stop_started.wait(1))
+                self.assertTrue(service._stopping.wait(1))
+                if case == 'timeout':
+                    self.assertTrue(stop_done.wait(0.85), 'stop exceeded bounded lock wait')
+                    self.assertEqual([str(error) for error in stop_errors], ['notifier retirement incomplete'])
+                    self.assertFalse(retired.is_set())
+                else:
+                    retired.wait(0.2)
+                    release.set()
+                    self.assertTrue(stop_done.wait(2))
+                    names = [name for name, _ in events]
+                    self.assertLess(names.index('admission exit'), names.index('retire'), events)
+                    self.assertLess(names.index('join'), names.index('retire'), events)
+                    selected = [events[names.index(name)] for name in ('admission exit', 'join', 'retire')]
+                    samples = [tick for _, tick in selected]
+                    self.assertEqual(samples, sorted(samples), selected)
+                    sample_path = os.environ.get('ADT_TEST8_SAMPLES')
+                    if sample_path:
+                        with Path(sample_path).open('a') as out:
+                            print(json.dumps(dict(selected)), file=out)
+                    self.assertEqual(stop_errors, [])
+            finally:
+                release.set()
+                if starter.ident is not None:
+                    self._join_ack(starter)
+                if stopper.ident is not None:
+                    self._join_ack(stopper)
+                service.stop()
+
     def test_start_without_verified_idle_opens_no_store(self):
         service = self.m.ApiService(str(self.root), P, clock=lambda: 1)
         with patch.object(store_layout.sqlite3, 'connect') as opens:

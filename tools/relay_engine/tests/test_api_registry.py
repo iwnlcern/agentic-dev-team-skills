@@ -100,7 +100,8 @@ class TestSliceBRules(unittest.TestCase):
             with self.subTest(count=count):
                 value = base64.b64encode(b'\x00' * count).decode()
                 result = r.validate_type(compiled, d.TypeRef('DraftBase64'), value)
-                if count in (1, 131072): self.assertNotIsInstance(result, r.ValidationFailure)
+                if count in (1, 131072):
+                    self.assertNotIsInstance(result, r.ValidationFailure)
                 else:
                     self.assertIsInstance(result, r.ValidationFailure)
                     self.assertEqual(result.rule, 'canonical_base64')
@@ -175,7 +176,8 @@ class TestSliceBRules(unittest.TestCase):
         graph = d.discovery_definitions()
         graph = replace(graph, types=graph.types + (d.TypeDef('ThirdId', d.String('.*'),
                         (d.Utf8MaxBytes(d.TypeRef('ThirdId'), 256),)),))
-        with self.assertRaises(r.RegistryCompileError) as caught: self.compile(graph)
+        with self.assertRaises(r.RegistryCompileError) as caught:
+            self.compile(graph)
         self.assertEqual(caught.exception.reason, 'invalid_rule')
 
     def test_relay_admission_metadata_accepted(self):
@@ -378,7 +380,8 @@ class TestErrorCatalog(unittest.TestCase):
         from relay_engine import api_registry as r
         compiled = self.admission_registry()
         for field in ('params', 'text'):
-            error = self.admission_error(); error['cause'][field] = 'untrusted'
+            error = self.admission_error()
+            error['cause'][field] = 'untrusted'
             with self.subTest(field=field):
                 self.assertIsInstance(r.validate_type(compiled, d.TypeRef('ApiError'), error), r.ValidationFailure)
 
@@ -525,7 +528,7 @@ class TestErrorCatalog(unittest.TestCase):
         }
         def digest(data):
             return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-        self.assertEqual(digest(value), '963075d4c260b9eb0b108a4d8aabf9e66ad0b0d97e31f2bb663f09694eb22857')
+        self.assertEqual(digest(value), 'f4113784c65bebef92eb0d0dbfb76e134d08d7f223810daa505e1e8f01c7f012')
         self.assertFalse(any(k.startswith('E_API_') for k in errors.ERRORS))
         changed = dict(value, errors=dict(value['errors'], E_API_INTERNAL={}))
         self.assertNotEqual(digest(changed), digest(value))
@@ -566,7 +569,8 @@ class TestCompile(unittest.TestCase):
                              principal=principal, effect=effect, retry=retry,
                              browser_get='none', rules=())
                 graph = replace(self.graph, operations=(op,))
-                handler = lambda args: None
+                def handler(args):
+                    return None
                 registry = self.compile(graph=graph, handlers={op.name: handler})
                 self.assertEqual(registry.operation(op.name), op)
                 self.assertIs(registry.handlers[op.name], handler)

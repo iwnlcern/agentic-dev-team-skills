@@ -160,6 +160,7 @@ TABLE_OWNERS: dict[str, str] = {
     "bodies": "engine",
     "recipients": "engine",
     "edges": "engine",
+    "foreign_edges": "engine",
     "bundles": "engine",
     "findings": "engine",
     "finding_events": "engine",
@@ -325,6 +326,7 @@ _STORE_HELD_TABLES = (
     reason TEXT,
     created_at INTEGER NOT NULL,
     changed_at INTEGER NOT NULL,
+    admit_seq INTEGER NOT NULL UNIQUE,
     PRIMARY KEY (relay_id, receiver_project_id),
     CHECK (reason IS NULL OR
         (state = 'allowed' AND reason IN ('receiver_stopped', 'receiver_unavailable')) OR
@@ -358,9 +360,14 @@ _STORE_HELD_TABLES = (
     at INTEGER NOT NULL,
     FOREIGN KEY (relay_id, receiver_project_id) REFERENCES xproject_transfers (relay_id, receiver_project_id)
 ) STRICT""",
+    """CREATE TABLE IF NOT EXISTS xproject_notices (
+    event_id INTEGER PRIMARY KEY REFERENCES xproject_events (event_id),
+    notice_relay_id TEXT NOT NULL UNIQUE REFERENCES relays (id),
+    filed_at INTEGER NOT NULL
+) STRICT""",
 )
 TABLE_OWNERS.update({name: 'store' for name in (
-    'xproject_transfers', 'xproject_recipients', 'xproject_deliveries', 'xproject_events',
+    'xproject_transfers', 'xproject_recipients', 'xproject_deliveries', 'xproject_events', 'xproject_notices',
 )})
 
 
@@ -480,6 +487,16 @@ _TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + _STORE_HELD_TABLES + (
         OR (target_type = 'path' AND target_relay_id IS NULL
             AND target_repository_id IS NULL AND target_path IS NOT NULL))
 ) STRICT""" % (_hex64("digest_at_submit"), _object_id("digest_at_submit")),
+    """CREATE TABLE IF NOT EXISTS foreign_edges (
+    relay_id TEXT NOT NULL REFERENCES relays (id),
+    kind TEXT NOT NULL CHECK (kind IN ('parent', 'answers')),
+    ordinal INTEGER NOT NULL CHECK (ordinal > 0 AND (kind <> 'parent' OR ordinal = 1)),
+    source_project_id TEXT NOT NULL,
+    target_relay_id TEXT NOT NULL,
+    target_handle INTEGER NOT NULL CHECK (target_handle > 0),
+    spelling TEXT NOT NULL,
+    PRIMARY KEY (relay_id, kind, ordinal)
+) STRICT""",
     """CREATE TABLE IF NOT EXISTS bundles (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects (id),
@@ -740,6 +757,8 @@ _TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + _STORE_HELD_TABLES + (
 
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS xproject_transfers_receiver_state ON xproject_transfers (receiver_project_id, state)",
+    "CREATE INDEX IF NOT EXISTS xproject_transfers_pending ON xproject_transfers "
+    "(receiver_project_id, admit_seq) WHERE state IN ('held', 'allowed')",
     "CREATE INDEX IF NOT EXISTS verification_requests_bytes ON verification_requests (artifact, content_sha256)",
     "CREATE UNIQUE INDEX IF NOT EXISTS relays_submission_party ON relays"
     " (coalesce(sender_seat_id, sender_special), submission_key)"
@@ -753,6 +772,8 @@ _INDEXES = (
     " WHERE role = 'to' AND delivered_at IS NULL AND opened_at IS NULL",
     "CREATE INDEX IF NOT EXISTS recipients_open ON recipients (relay_id)"
     " WHERE role = 'to' AND answered_by IS NULL",
+    "CREATE INDEX IF NOT EXISTS foreign_edges_source_target"
+    " ON foreign_edges (source_project_id, target_relay_id)",
     "CREATE INDEX IF NOT EXISTS edges_from ON edges (from_relay_id)",
     "CREATE INDEX IF NOT EXISTS edges_target_relay ON edges (target_relay_id)",
     "CREATE INDEX IF NOT EXISTS edges_target_git ON edges (target_repository_id, target_path)",
@@ -787,6 +808,10 @@ _TRIGGERS = tuple(
 WHEN NEW.handle IS NOT OLD.handle
 BEGIN SELECT RAISE(ABORT, 'a handle never changes'); END""" % (table, table)
     for table in ("relays", "findings")) + (
+    """CREATE TRIGGER IF NOT EXISTS foreign_edges_no_update BEFORE UPDATE ON foreign_edges
+BEGIN SELECT RAISE(ABORT, 'foreign edge is immutable'); END""",
+    """CREATE TRIGGER IF NOT EXISTS foreign_edges_no_delete BEFORE DELETE ON foreign_edges
+BEGIN SELECT RAISE(ABORT, 'foreign edge is immutable'); END""",
     # A closed bundle stays closed (slice 2a D4); setting it once, or to the same value, is allowed.
     """CREATE TRIGGER IF NOT EXISTS bundles_closed_at_fixed BEFORE UPDATE OF closed_at ON bundles
 WHEN OLD.closed_at IS NOT NULL AND NEW.closed_at IS NOT OLD.closed_at
@@ -853,6 +878,10 @@ BEGIN SELECT RAISE(ABORT, 'delivery record is insert-only'); END""",
 BEGIN SELECT RAISE(ABORT, 'transfer event is append-only'); END""",
     """CREATE TRIGGER IF NOT EXISTS xproject_events_kept BEFORE DELETE ON xproject_events
 BEGIN SELECT RAISE(ABORT, 'transfer event is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS xproject_notices_fixed BEFORE UPDATE ON xproject_notices
+BEGIN SELECT RAISE(ABORT, 'notice receipt is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS xproject_notices_kept BEFORE DELETE ON xproject_notices
+BEGIN SELECT RAISE(ABORT, 'notice receipt is append-only'); END""",
 )
 
 
