@@ -29,6 +29,7 @@ The test never names the native package, so a missing one shows as tsc failing, 
 `$ADT_TOOLCHAINS` replaces the default folder rather than adding to it, and an empty value resolves to the current directory.
 Without the toolchains `test_api_schema` fails or errors; no other test module needs them.
 The linux leg installs the same versions, with pinned digests, in its image (`tools/release-check.Dockerfile`), so only the mac leg and a contributor's machine need a local install.
+The Linux image also carries Playwright and playwright-core 1.62.1 and Chromium headless shell 151.0.7922.34 (revision 1234) at `/opt/adt-toolchains/page-toolchain-1.62.1`, with npm tarballs checked against their SHA-512 integrity values and browser archives pinned by architecture to SHA-256 values measured for this image.
 After any change to the API registry, its definitions or `tools/generate-api.py` itself, run `python3 tools/generate-api.py --write` first and `python3 tools/generate-plugins.py` second, because the plugin generator copies the four generated API files into `plugins/`; in the other order the plugin copies stay stale and `generate-plugins.py --check` fails.
 `python3 tools/generate-api.py --check` verifies the generated files without writing them.
 

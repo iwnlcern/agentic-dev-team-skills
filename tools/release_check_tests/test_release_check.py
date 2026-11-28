@@ -2,6 +2,7 @@
 
 import contextlib
 import fnmatch
+import hashlib
 import importlib.util
 import io
 import json
@@ -2206,6 +2207,70 @@ class TestingDoc(unittest.TestCase):
         self.assertIn("target test_version_renamed does not exist", trap_problems(REPO, broken))
         broken = text.replace("`shared/**`", "`no-such-dir/**`", 1)
         self.assertIn("glob no-such-dir/** matches no tracked file", trap_problems(REPO, broken))
+
+
+class PageToolchainRecipe(unittest.TestCase):
+    RECIPE = Path(__file__).resolve().parents[1] / "release-check.Dockerfile"
+    BASE_SHA256 = "5ac9796fa9ca56d64dc5462f892b71b4e7e6cc4e24606031b2ed1c685b0f5d07"
+    TARBALLS = (
+        ("playwright.tgz", "https://registry.npmjs.org/playwright/-/playwright-1.62.1.tgz",
+         "0M+L3LAD8/nm554LOla9Ayx0j0tmFZ0FBcoQ7F1VuVHpM/XpiC8RcDzBQB8W5+hA8L22THxELzeF+2WcUzvcLg=="),
+        ("playwright-core.tgz", "https://registry.npmjs.org/playwright-core/-/playwright-core-1.62.1.tgz",
+         "wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw=="),
+    )
+    ARCHIVES = (
+        ("arm64", "https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1234/"
+         "chromium-headless-shell-linux-arm64.zip",
+         "b03443e1e1a60d06e07b6cdfe650b8c2bfcbb3db497d2b652f73dc6912f4ae15"),
+        ("amd64", "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip",
+         "3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14"),
+    )
+
+    def test_page_toolchain_urls_each_once(self):
+        text = self.RECIPE.read_text()
+        for _, url, _ in (*self.TARBALLS, *self.ARCHIVES):
+            self.assertEqual(text.count(url), 1, url)
+
+    def test_page_toolchain_digests_beside_their_files(self):
+        lines = self.RECIPE.read_text().splitlines()
+        case_arms = re.findall(r"(?ms)^[ \t]+(arm64|amd64)\)(.*?);;", "\n".join(lines))
+        for arch, url, digest in self.ARCHIVES:
+            matching = [arm for name, arm in case_arms if name == arch and f"archive_url='{url}';" in arm]
+            self.assertEqual(len(matching), 1, f"{arch} archive URL in its case arm")
+            self.assertEqual(re.findall(r"\barchive_sha=([0-9a-f]{64});", matching[0]), [digest],
+                             f"{arch} archive SHA-256 in its case arm")
+        verifiers = [line for line in lines
+                     if line.strip().startswith("python3 -c ") and "hashlib.sha512" in line]
+        for filename, url, digest in self.TARBALLS:
+            self.assertTrue(any(f"'{url}' -o {filename};" in line for line in lines), filename)
+            self.assertTrue(any(f'("{filename}","{digest}")' in line for line in verifiers), filename)
+
+    def test_page_toolchain_version_assertion(self):
+        assertion = (
+            '''test "$("$ADT_TOOLCHAINS/node-v26.13.0/bin/node" -p 'require(process.argv[1]).version' '''
+            '''"$ADT_TOOLCHAINS/page-toolchain-1.62.1/node_modules/playwright/package.json")" = '1.62.1' '''
+        ).rstrip()
+        lines = self.RECIPE.read_text().splitlines()
+        matches = [line.strip().removesuffix("\\").rstrip().removesuffix(";") for line in lines]
+        self.assertEqual(matches.count(assertion), 1, "exact Playwright 1.62.1 package version assertion")
+
+    def test_page_toolchain_env(self):
+        lines = self.RECIPE.read_text().splitlines()
+        self.assertEqual(lines.count("ENV ADT_PAGE_TOOLCHAIN=/opt/adt-toolchains/page-toolchain-1.62.1"), 1)
+        self.assertFalse(any(re.match(r"\s*ENV\s+PATH(?:=|\s)", line) for line in lines), "ENV PATH")
+        self.assertFalse(any("PLAYWRIGHT_BROWSERS_PATH" in line for line in lines), "PLAYWRIGHT_BROWSERS_PATH")
+
+    def test_page_toolchain_after_existing_layers(self):
+        lines = self.RECIPE.read_bytes().splitlines(keepends=True)
+        stop = next(i + 1 for i, line in enumerate(lines)
+                    if line.startswith(b'RUN test ') and line.rstrip().endswith(b"= 'Version 7.0.2'"))
+        runs = [i for i in range(stop, len(lines)) if lines[i].startswith(b"RUN ")]
+        self.assertEqual(len(runs), 1, "one new RUN after the TypeScript version assertion")
+        self.assertEqual(hashlib.sha256(b"".join(lines[:stop])).hexdigest(), self.BASE_SHA256,
+                         "base Dockerfile bytes before the new layer")
+        self.assertTrue(all(not line.strip() or line.startswith(b"#") for line in lines[stop:runs[0]]),
+                        "only the comment and separator precede the new RUN")
+
 
 
 if __name__ == "__main__":
