@@ -112,7 +112,8 @@ def _rule(rule, node, types, operation=None):
             raise RegistryCompileError('invalid_rule')
     elif isinstance(rule, d.CanonicalBase64):
         limits = {'CanonicalSchemaBase64': d.MAX_SCHEMA_BYTES, 'DraftBase64': 131072,
-                  'RelayBodyBase64': 8388608}
+                  'RelayBodyBase64': 8388608, 'TerminalArgsBase64': 10240,
+                  'TerminalSignatureBase64': 1024, 'TerminalResultBase64': 65536}
         if node.name not in limits or type(rule.max_decoded) is not int:
             raise RegistryCompileError('invalid_rule')
         expected = d.CanonicalBase64(d.TypeRef(node.name), limits[node.name])
@@ -294,8 +295,9 @@ def compile_registry(definitions: d.DefinitionGraph, handlers: Mapping[str, Call
                 or op.principal not in {'unsigned', 'seat_key', 'seat_session', 'operator', 'service'}
                 or op.effect not in {'connection_metadata', 'pure_observation',
                                      'session_write', 'connection_binding', 'relay_admission',
-                                     'catalogue_write', 'relay_open', 'settings_write'}
-                or op.retry not in {'read_repeat', 'operation_key', 'submission_key'}
+                                     'catalogue_write', 'relay_open', 'settings_write',
+                                     'operator_challenge', 'operator_confirmed_act'}
+                or op.retry not in {'read_repeat', 'operation_key', 'submission_key', 'none'}
                 or op.browser_get not in {'connect', 'schema', 'none'} | queue_get_routes
                 or (op.browser_get != 'none' and
                     (op.principal != 'unsigned' or op.effect == 'catalogue_write'))

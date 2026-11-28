@@ -346,7 +346,8 @@ class SessionTests(unittest.TestCase):
                  'session.end', 'session.resume', 'session.sign-in')
         queue = ('queue.answer', 'queue.dismiss', 'queue.dismiss-all', 'queue.get',
                  'queue.list', 'queue.open', 'queue.raise', 'queue.withdraw')
-        self.assertEqual(self.registry.capabilities(), tuple(sorted(names + queue)))
+        terminal = ('operator.terminal-act', 'operator.terminal-challenge')
+        self.assertEqual(self.registry.capabilities(), tuple(sorted(names + queue + terminal)))
         self.assertEqual(set(platform.platform_handlers()), set(names))
         with patch.object(p, 'session_handlers', return_value={'protocol.connect': lambda: None}):
             with self.assertRaises(ValueError):

@@ -90,3 +90,19 @@ class OperatorTerminalTests(unittest.TestCase):
                 ADT['confirm_locally']('engine_start', {'root': '/selected'}, store_id='store')
         self.assertEqual(trace, ['probe'])
         verify.assert_not_called()
+
+class OperatorTerminalPurposeTests(unittest.TestCase):
+    def test_purposes_match_the_helper(self):
+        import ast
+        from pathlib import Path
+        from relay_engine.operator_terminal import PURPOSES
+
+        path = Path(__file__).resolve().parents[2] / 'adt-operator-check'
+        tree = ast.parse(path.read_bytes())
+        assignment = next(node for node in tree.body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == 'PURPOSES'
+                                  for target in node.targets))
+        helper = ast.literal_eval(assignment.value)
+        self.assertEqual(PURPOSES, helper)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(tuple(value for value in PURPOSES if value != 'seat_unseat'), helper)

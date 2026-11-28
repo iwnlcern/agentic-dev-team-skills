@@ -1168,6 +1168,22 @@ def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
             ("item_not_found", "refresh_list"),
             ("project_not_active", "check_subject"),
         )),
+        ("E_TERMINAL_CHALLENGE", "conflict", "ApiTerminalChallengeCause", (
+            ("challenge_unknown", "request_new_challenge"),
+            ("challenge_used", "request_new_challenge"),
+            ("challenge_expired", "request_new_challenge"),
+        )),
+        ("E_TERMINAL_LIMIT", "unavailable", "ApiTerminalLimitCause", (
+            ("challenge_limit", "retry_after_challenge_expiry"),
+        )),
+        ("E_TERMINAL_CHECK", "auth", "ApiTerminalCheckCause", (
+            ("bad_signature", "confirm_again"),
+            ("key_unsafe", "reinstall_operator_check"),
+        )),
+        ("E_TERMINAL_INVALID", "wire", "ApiTerminalInvalidCause", (
+            ("args_not_canonical", "send_canonical_args"),
+            ("purpose_unhandled", "update_kit"),
+        )),
         ("E_QUEUE_INVALID", "wire", "ApiQueueInvalidCause", (
             ("kind_not_raisable", "use_permitted_kind"),
             ("surface_not_allowed", "answer_on_permitted_surface"),
