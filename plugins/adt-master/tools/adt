@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
-from collections.abc import Callable, Sequence
+import base64
+from collections.abc import Callable, Mapping, Sequence
 import errno
 import fcntl
 import json
@@ -19,7 +20,7 @@ import uuid
 
 from relay_engine import lifecycle_paths, store_layout
 from relay_engine.adt_cli import CommandGroup, _bridge_port, main
-from relay_engine.api_client import LocalRefusal, read_ready_file
+from relay_engine.api_client import ApiClient, ApiErrorValue, EndpointUnavailable, LocalRefusal, read_ready_file
 from relay_engine.api_operator_bridge import _private_launch_file, _read_launch_url
 from relay_engine.operator_queue.notifier import DeliveryCancelled, KnownNotifierFailure, NotifierIssueUnavailable
 
@@ -564,6 +565,67 @@ def prove(message: bytes, act_line: str, *, run: Callable, clock: Callable,
     return result.stdout
 
 
+def _default_terminal_prove(message: bytes, act_line: str) -> bytes:
+    return prove(message, act_line, run=_operator_run, clock=time.monotonic_ns, lstat=os.lstat)
+
+
+def _show_terminal_act(line: str) -> None:
+    print(line, file=sys.stderr, flush=True)
+
+
+def confirm_with_service(
+    client: ApiClient, purpose: str, args: Mapping, *, act_line: str,
+    prove: Callable[[bytes, str], bytes] = _default_terminal_prove,
+    show: Callable[[str], None] = _show_terminal_act,
+) -> Mapping | ApiErrorValue:
+    from relay_engine import jcs
+    from relay_engine.operator_check_words import refusal_line, render_act_line
+    from relay_engine.operator_terminal import ActAnswerLost, ActNotSent, OperatorCheckRefused, build_message
+
+    payload = dict(args)
+    encoded = jcs.jcs_encode(payload)
+    if len(encoded) > 10240:
+        raise ActNotSent('The act arguments exceed 10240 bytes.')
+
+    try:
+        challenge = client.call('operator.terminal-challenge', {})
+    except (LocalRefusal, EndpointUnavailable) as error:
+        raise ActNotSent(str(error)) from error
+    if isinstance(challenge, ApiErrorValue):
+        raise ActNotSent(f"{challenge.code} {challenge.cause['kind']}")
+
+    message = build_message(purpose, payload, store_id=challenge['store_id'],
+                            value=bytes.fromhex(challenge['value']))
+    show(render_act_line(act_line))
+    try:
+        signature = prove(message, act_line)
+    except OperatorCheckRefused as error:
+        raise ActNotSent(refusal_line(error)) from error
+    except KeyboardInterrupt as error:
+        raise ActNotSent(None) from error
+
+    try:
+        answer = client.call('operator.terminal-act', {
+            'challenge_id': challenge['challenge_id'],
+            'purpose': purpose,
+            'args_base64': base64.b64encode(encoded).decode('ascii'),
+            'signature_base64': base64.b64encode(signature).decode('ascii'),
+        })
+    except (LocalRefusal, EndpointUnavailable) as error:
+        raise ActAnswerLost(str(error)) from error
+    if isinstance(answer, ApiErrorValue):
+        return answer
+
+    unreadable = "the service's answer could not be read"
+    try:
+        result = json.loads(base64.b64decode(answer['result_base64'], validate=True))
+    except (KeyError, ValueError, TypeError, RecursionError) as error:
+        raise ActAnswerLost(unreadable) from error
+    if not isinstance(result, dict):
+        raise ActAnswerLost(unreadable)
+    return result
+
+
 def confirm_locally(purpose: str, args, *, store_id: str):
     from relay_engine.operator_check_words import describe_act
     from relay_engine.operator_terminal import require_operator
@@ -603,6 +665,7 @@ def _engine_owner_group():
 
 def _run_selected_owner(args):
     from relay_engine import operator_terminal, owner_start
+    from relay_engine.operator_check_words import refusal_line
 
     def launch(command, **options):
         return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *command],
@@ -615,10 +678,7 @@ def _run_selected_owner(args):
             show=lambda line: print(line, file=sys.stderr, flush=True),
         )
     except operator_terminal.OperatorCheckRefused as error:
-        detail = str(error)
-        if error.reason == 'not_installed':
-            detail = 'The operator check is missing. Run adt operator install-check.'
-        print(f'adt engine run: {detail}', file=sys.stderr)
+        print(f'adt engine run: {refusal_line(error)}', file=sys.stderr)
         return 1
     except (owner_start.StartupRefused, store_layout.LayoutFault, OSError, ValueError) as error:
         guidance = {

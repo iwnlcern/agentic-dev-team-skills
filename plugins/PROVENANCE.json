@@ -590,7 +590,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adt",
-    "sha256": "4d6e6ac611fd70914d7b54f5663662eb8a030c18785e82a3a08c6a60231f62dd",
+    "sha256": "e114c3ce1acc1f0bac7e2469e993cfa473519041f4d8b71f7714ff215b5e0c81",
     "source": "tools/adt"
   },
   {
@@ -11066,7 +11066,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/operator_check_words.py",
-    "sha256": "703a5dcc722ca859f65e205f0f445847964d522d485927b06a6abd482b7f29d5",
+    "sha256": "9ecd55245980475d0444cdc2af42b0f6ff4ee7169b67f77bbeaf6bdfc6d0576a",
     "source": "tools/relay_engine/operator_check_words.py"
   },
   {
@@ -11804,7 +11804,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adt",
-    "sha256": "4d6e6ac611fd70914d7b54f5663662eb8a030c18785e82a3a08c6a60231f62dd",
+    "sha256": "e114c3ce1acc1f0bac7e2469e993cfa473519041f4d8b71f7714ff215b5e0c81",
     "source": "tools/adt"
   },
   {
@@ -22280,7 +22280,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/operator_check_words.py",
-    "sha256": "703a5dcc722ca859f65e205f0f445847964d522d485927b06a6abd482b7f29d5",
+    "sha256": "9ecd55245980475d0444cdc2af42b0f6ff4ee7169b67f77bbeaf6bdfc6d0576a",
     "source": "tools/relay_engine/operator_check_words.py"
   },
   {
@@ -22934,7 +22934,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adt",
-    "sha256": "4d6e6ac611fd70914d7b54f5663662eb8a030c18785e82a3a08c6a60231f62dd",
+    "sha256": "e114c3ce1acc1f0bac7e2469e993cfa473519041f4d8b71f7714ff215b5e0c81",
     "source": "tools/adt"
   },
   {
@@ -33410,7 +33410,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/operator_check_words.py",
-    "sha256": "703a5dcc722ca859f65e205f0f445847964d522d485927b06a6abd482b7f29d5",
+    "sha256": "9ecd55245980475d0444cdc2af42b0f6ff4ee7169b67f77bbeaf6bdfc6d0576a",
     "source": "tools/relay_engine/operator_check_words.py"
   },
   {

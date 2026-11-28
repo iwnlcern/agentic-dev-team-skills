@@ -1,5 +1,7 @@
 """Terminal confirmation rendering and measured sudo refusals."""
 
+from relay_engine.operator_terminal import OperatorCheckRefused
+
 SUDO_REFUSALS = (
     ('is not in the sudoers file', 'linux', 'Debian sudo 1.9.16p2, IMPL 070854 row 8'),
     ('is not allowed to execute', 'none', 'documented sudo refusal, design section 4'),
@@ -10,6 +12,12 @@ def render_act_line(text: str) -> str:
     rendered = ''.join(f'\\x{ord(char):02x}' if ord(char) < 32 or 127 <= ord(char) <= 159 else char
                        for char in text)
     return rendered if len(rendered) <= 160 else rendered[:159] + '…'
+
+
+def refusal_line(error: OperatorCheckRefused) -> str:
+    if error.reason == 'not_installed':
+        return 'The operator check is missing. Run adt operator install-check.'
+    return render_act_line(str(error))
 
 
 def prompt_text(act_line: str) -> str:
