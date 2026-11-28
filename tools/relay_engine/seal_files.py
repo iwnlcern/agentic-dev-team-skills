@@ -17,6 +17,17 @@ from . import seal_slots
 from .seal_types import RecordUnreadable, require_canonical_id
 
 
+_EXCLUSION_KIND = 'tmutil' if sys.platform == 'darwin' else 'cachedir'
+
+
+class ExclusionStopped(Exception):
+    """No exclusion call may start after stop."""
+
+
+class ExclusionKilled(Exception):
+    """Stop killed an exclusion call after launch."""
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True, eq=False)
 class Key:
     seq: int
@@ -322,13 +333,32 @@ class SealFolder:
 
     def apply_backup_exclusion(self, run):
         self._root()
-        if sys.platform == 'darwin':
-            if run(['tmutil', 'addexclusion', str(self.root)]).returncode != 0:
-                return 'add_failed'
-            checked = run(['tmutil', 'isexcluded', str(self.root)])
-            if checked.returncode != 0:
-                return 'check_failed'
-            return 'excluded' if checked.stdout.splitlines()[:1] and checked.stdout.splitlines()[0].startswith(b'[Excluded]') else 'not_excluded'
+        if _EXCLUSION_KIND == 'tmutil':
+            def check():
+                try:
+                    checked = run(['tmutil', 'isexcluded', str(self.root)])
+                    if checked.returncode == 0:
+                        return next(iter(checked.stdout.splitlines()), b'')
+                except (ExclusionStopped, ExclusionKilled):
+                    raise
+                except Exception:
+                    pass
+                return b''
+
+            if check().startswith(b'[Excluded]'):
+                return 'excluded'
+            try:
+                add_failed = run(['tmutil', 'addexclusion', str(self.root)]).returncode != 0
+            except (ExclusionStopped, ExclusionKilled):
+                raise
+            except Exception:
+                add_failed = True
+            deciding = check()
+            if deciding.startswith(b'[Excluded]'):
+                return 'excluded'
+            if deciding.startswith(b'[Included]'):
+                return 'add_failed' if add_failed else 'not_excluded'
+            return 'check_failed'
         try:
             _publish(self.root / 'CACHEDIR.TAG', _TAG)
         except OSError:

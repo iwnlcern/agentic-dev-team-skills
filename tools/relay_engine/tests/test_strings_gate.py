@@ -124,7 +124,14 @@ def gate_violations(paths):
             owner = enclosing_function(node)
             fn = owner.name if owner is not None else None
             tmutil_site = (module == "seal_wiring" and isinstance(owner, ast.FunctionDef)
-                           and owner.name == "_run_tmutil" and parents.get(owner) is tree)
+                           and owner.name == "_spawn_tmutil" and parents.get(owner) is tree)
+            if module == "seal_wiring" and isinstance(node, ast.Name) and node.id == "_spawn_tmutil":
+                parent = parents.get(node)
+                cls = parents.get(owner)
+                if not (isinstance(parent, ast.Call) and parent.func is node and fn == "run"
+                        and isinstance(cls, ast.ClassDef) and cls.name == "TmutilCustody"
+                        and parents.get(cls) is tree):
+                    violations.append((module, node.lineno, "tmutil launch outside custody run"))
             if (module == "seal_wiring" and isinstance(node, ast.Name) and
                     node.id == "subprocess" and
                     not (isinstance(parents.get(node), ast.Attribute) and parents[node].value is node)):
@@ -267,7 +274,7 @@ def gate_violations(paths):
                 if (module == "seal_wiring" and isinstance(node.value, ast.Name) and
                         node.value.id == "subprocess"):
                     parent = parents.get(node)
-                    if tmutil_site and node.attr == "run" and isinstance(parent, ast.Call) and parent.func is node:
+                    if tmutil_site and node.attr == "Popen" and isinstance(parent, ast.Call) and parent.func is node:
                         seal_launches += 1
                         if seal_launches > 1:
                             violations.append((module, node.lineno, "second tmutil launch site"))
@@ -313,7 +320,7 @@ class TestGate(unittest.TestCase):
         return paths
 
     def test_strings_gate_allows_one_launch_site(self):
-        launch = 'import subprocess\ndef _run_tmutil(argv): return subprocess.run(argv)\n'
+        launch = 'import subprocess\ndef _spawn_tmutil(argv): return subprocess.Popen(argv)\n'
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'seal_wiring.py'
             path.write_text(launch)
@@ -322,12 +329,15 @@ class TestGate(unittest.TestCase):
             other.write_text(launch)
             self.assertTrue(gate_violations([str(other)]))
             for source in (
-                launch.replace('subprocess.run', 'subprocess.Popen'),
-                launch.replace('_run_tmutil', 'another_function'),
-                launch.replace('subprocess.run(argv)', '(subprocess.run(argv), subprocess.run(argv))'),
-                launch.replace('import subprocess', 'import subprocess as sp').replace('subprocess.run', 'sp.run'),
-                'from subprocess import run\ndef _run_tmutil(argv): return run(argv)\n',
-                launch.replace('subprocess.run(argv)', 'subprocess.run'),
+                launch.replace('subprocess.Popen', 'subprocess.run'),
+                launch + 'class TmutilCustody:\n    def close(self): subprocess.Popen([])\n',
+                launch + 'class TmutilCustody:\n    def close(self): _spawn_tmutil([])\n',
+                launch + 'runner = _spawn_tmutil\n',
+                launch.replace('_spawn_tmutil', 'another_function'),
+                launch.replace('subprocess.Popen(argv)', '(subprocess.Popen(argv), subprocess.Popen(argv))'),
+                launch.replace('import subprocess', 'import subprocess as sp').replace('subprocess.Popen', 'sp.run'),
+                'from subprocess import run\ndef _spawn_tmutil(argv): return run(argv)\n',
+                launch.replace('subprocess.Popen(argv)', 'subprocess.Popen'),
             ):
                 with self.subTest(source=source):
                     path.write_text(source)
