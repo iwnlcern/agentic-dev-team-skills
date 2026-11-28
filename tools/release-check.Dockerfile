@@ -54,3 +54,44 @@ RUN set -eu; \
     test "$("$ADT_TOOLCHAINS/rust-1.99.1/bin/rustc" --version)" = 'rustc 1.99.1 (58cf8f9c3 2026-10-13)'; \
     test "$("$ADT_TOOLCHAINS/node-v26.13.0/bin/node" --version)" = 'v26.13.0'
 RUN test "$("$ADT_TOOLCHAINS/node-v26.13.0/bin/node" "$ADT_TOOLCHAINS/typescript-7.0.2/node_modules/typescript/bin/tsc" --version)" = 'Version 7.0.2'
+
+# Page-walk pins measured in Task 1 on 2026-11-27 (Debian trixie).
+RUN set -eu; \
+    umask 022; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends unzip \
+      libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2 \
+      libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 libnspr4 libnss3 \
+      libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
+      libxkbcommon0 libxrandr2; \
+    rm -rf /var/lib/apt/lists/*; \
+    case "$(dpkg --print-architecture)" in \
+      arm64) \
+        archive_url='https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1234/chromium-headless-shell-linux-arm64.zip'; \
+        archive_sha=b03443e1e1a60d06e07b6cdfe650b8c2bfcbb3db497d2b652f73dc6912f4ae15; \
+        archive_executable=chrome-linux/headless_shell ;; \
+      amd64) \
+        archive_url='https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip'; \
+        archive_sha=3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14; \
+        archive_executable=chrome-headless-shell-linux64/chrome-headless-shell ;; \
+      *) exit 1 ;; \
+    esac; \
+    downloads=$(mktemp -d); cd "$downloads"; \
+    curl --fail --location --silent --show-error 'https://registry.npmjs.org/playwright/-/playwright-1.62.1.tgz' -o playwright.tgz; \
+    curl --fail --location --silent --show-error 'https://registry.npmjs.org/playwright-core/-/playwright-core-1.62.1.tgz' -o playwright-core.tgz; \
+    curl --fail --location --silent --show-error "$archive_url" -o chromium-headless-shell.zip; \
+    printf '%s  chromium-headless-shell.zip\n' "$archive_sha" | sha256sum --check --strict -; \
+    python3 -c 'import base64,hashlib,pathlib,sys; pairs=[("playwright.tgz","0M+L3LAD8/nm554LOla9Ayx0j0tmFZ0FBcoQ7F1VuVHpM/XpiC8RcDzBQB8W5+hA8L22THxELzeF+2WcUzvcLg=="),("playwright-core.tgz","wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==")]; all_ok=all(base64.b64encode(hashlib.sha512(pathlib.Path(name).read_bytes()).digest()).decode()==expected for name,expected in pairs); sys.exit(0 if all_ok else 1)'; \
+    page_toolchain="$ADT_TOOLCHAINS/page-toolchain-1.62.1"; \
+    browser="$page_toolchain/browsers/chromium_headless_shell-1234"; \
+    mkdir -p "$page_toolchain/node_modules/playwright" "$page_toolchain/node_modules/playwright-core" "$browser"; \
+    printf '%s\n' '{"name":"adt-page-toolchain","private":true,"dependencies":{"playwright":"1.62.1"}}' > "$page_toolchain/package.json"; \
+    tar -xzf playwright.tgz --no-same-owner --strip-components=1 -C "$page_toolchain/node_modules/playwright"; \
+    tar -xzf playwright-core.tgz --no-same-owner --strip-components=1 -C "$page_toolchain/node_modules/playwright-core"; \
+    unzip -q chromium-headless-shell.zip -d "$browser"; \
+    touch "$browser/INSTALLATION_COMPLETE"; \
+    cd /; rm -rf "$downloads"; \
+    test -x "$browser/$archive_executable"; \
+    test "$("$ADT_TOOLCHAINS/node-v26.13.0/bin/node" -p 'require(process.argv[1]).version' "$ADT_TOOLCHAINS/page-toolchain-1.62.1/node_modules/playwright/package.json")" = '1.62.1'
+
+ENV ADT_PAGE_TOOLCHAIN=/opt/adt-toolchains/page-toolchain-1.62.1

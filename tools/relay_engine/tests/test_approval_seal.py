@@ -14,7 +14,7 @@ import struct
 import sys
 import tempfile
 import threading
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest import mock
 import uuid
@@ -360,9 +360,15 @@ class ApprovalSealTests(unittest.TestCase):
     def assert_errno_refusal(self, exc, cause, chain=None, *, report=True):
         self.assertEqual((exc.cause, exc.chain_id), (cause, chain))
         self.assertEqual(exc.errno_name, 'ENOSPC')
-        self.assertEqual(str(exc), f"{(cause, chain)!r} errno=ENOSPC")
+        self.assert_errno_suffix(exc, f"{(cause, chain)!r} errno=ENOSPC")
         expected = [self.t.SealReport(P, chain, cause, 1234, 'ENOSPC')] if report else []
         self.assertEqual(self.reports, expected)
+
+    def assert_errno_suffix(self, exc, prefix):
+        message = str(exc)
+        self.assertEqual(message[:len(prefix)], prefix)
+        self.assertRegex(message[len(prefix):], r'\A( file=[!-~]+)?( op=[a-z0-9_]+(\.[a-z0-9_]+)+)\Z')
+        self.assertIsNotNone(exc.operation)
 
     def missing_project_refusal(self):
         with self.assertRaises(self.t.SealUnusable) as caught:
@@ -422,6 +428,35 @@ class ApprovalSealTests(unittest.TestCase):
             with self.assertRaises(self.t.SealUnusable) as caught:
                 self.service._abandoned(P, C, self.s.ItemKind.COUNTER, self.ledger)
         self.assert_errno_refusal(caught.exception, 'counter_unusable', C)
+
+    def test_comprehension_fault_names_read_slots(self):
+        self.set_chain()
+        with mock.patch.object(os, 'pread', side_effect=OSError(errno.ENOSPC, 'forced')):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.service._abandoned(P, C, self.s.ItemKind.COUNTER, self.ledger)
+        self.assertEqual(getattr(caught.exception, 'operation', None), 'seal_slots.read_slots')
+
+    def test_generator_and_lambda_frames_name_their_function(self):
+        def fault():
+            raise OSError(errno.ENOSPC, 'probe')
+
+        probe = ModuleType('relay_engine._seal_frame_probe')
+        probe.fault = fault
+        exec("""
+def probe_genexpr():
+    next(fault() for _ in (0,))
+
+def probe_lambda():
+    (lambda: fault())()
+""", probe.__dict__)
+        for name in ('probe_genexpr', 'probe_lambda'):
+            with self.subTest(frame=name):
+                try:
+                    getattr(probe, name)()
+                except OSError as error:
+                    self.assertEqual(self.a._raising_operation(error), f'_seal_frame_probe.{name}')
+                else:
+                    self.fail('probe did not raise OSError')
 
     def test_new_pointer_names_errno(self):
         with self.service._locked(P, exclusive=True, create=True):
@@ -501,12 +536,123 @@ class ApprovalSealTests(unittest.TestCase):
                                      transaction=1, declared_kinds=('approve',))
         self.assert_errno_refusal(caught.exception, 'counter_unusable', C)
 
+    def test_relative_operand_from_real_dir_fd_open(self):
+        keys = self.base / 'removed' / 'keys'
+        keys.mkdir(parents=True)
+        d = os.open(keys, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            keys.rmdir()
+            with self.assertRaises(FileNotFoundError) as captured:
+                fd = os.open('.creating-1.x', os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600, dir_fd=d)
+                os.close(fd)
+        finally:
+            os.close(d)
+        source = captured.exception
+        self.assertEqual(source.filename, '.creating-1.x')
+        self.assertEqual(source.errno, errno.ENOENT)
+        actual_open = os.open
+
+        def opened(path, *args, **kwargs):
+            directory = kwargs.get('dir_fd')
+            key_root = self.root / 'keys'
+            if (isinstance(path, str) and path.startswith('.creating-') and directory is not None
+                    and key_root.is_dir() and os.path.samestat(os.fstat(directory), key_root.stat())):
+                raise source
+            return actual_open(path, *args, **kwargs)
+
+        with mock.patch.object(os, 'open', side_effect=opened):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.set_chain()
+        exc = caught.exception
+        self.assertEqual((exc.cause, exc.chain_id, exc.errno_name),
+                         ('folder_unusable', None, 'ENOENT'))
+        self.assertEqual(getattr(exc, 'filename', None), '.creating-1.x', 'filename')
+        self.assertEqual(getattr(exc, 'operation', None), 'seal_files._publish', 'operation')
+        self.assertEqual(str(exc), "('folder_unusable', None) errno=ENOENT"
+                                   ' file=.creating-1.x op=seal_files._publish')
+
+    def test_operation_only_without_filename(self):
+        self.set_chain()
+        self.reports.clear()
+        with mock.patch.object(self.s.os, 'pwrite', side_effect=OSError(errno.ENOSPC, 'forced')):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.service._write_pointer(P, D, damaged=False)
+        exc = caught.exception
+        self.assertIsNone(getattr(exc, 'filename', None))
+        self.assertEqual(getattr(exc, 'operation', None), 'seal_slots._write', 'operation')
+        self.assertEqual(exc.args, ('folder_unusable', None, 'ENOSPC', None, 'seal_slots._write'))
+        self.assertEqual(str(exc), "('folder_unusable', None) errno=ENOSPC op=seal_slots._write")
+        self.assert_errno_refusal(exc, 'folder_unusable')
+
+    def test_deliberate_refusals_stay_byte_identical(self):
+        for exists in (False, True):
+            with self.subTest(exists=exists):
+                if exists:
+                    self.project.mkdir(parents=True)
+                with mock.patch.object(self.a.SealFolder, 'project_usable', return_value=False):
+                    exc = self.missing_project_refusal()
+                self.assertEqual(exc.args, ('folder_unusable', None))
+                self.assertEqual(str(exc), "('folder_unusable', None)")
+                self.assertIsNone(getattr(exc, 'filename', None))
+                self.assertIsNone(getattr(exc, 'operation', None))
+
+    def operand_refusal(self, operand):
+        with self.assertRaises(self.t.SealUnusable) as caught:
+            with self.service._locked(P, exclusive=True, create=True):
+                raise OSError(errno.ENOENT, 'forced', operand)
+        return caught.exception
+
+    def test_absolute_operand_under_root_is_relative(self):
+        exc = self.operand_refusal(str(self.root / 'keys' / '1'))
+        self.assertEqual(getattr(exc, 'filename', None), 'keys/1', 'filename')
+
+    def test_absolute_operand_outside_root_is_its_name(self):
+        exc = self.operand_refusal(str(self.base / 'other' / 'x'))
+        self.assertEqual(getattr(exc, 'filename', None), 'x', 'filename')
+
+    def test_operand_token_is_escaped_and_capped(self):
+        for operand, token in (
+            ('a\n b\\é', r'a\x0a\x20b\\\u00e9'),
+            (b'k\xff', r'k\udcff'),
+            ('x' * 300, 'x' * 255 + '~'),
+        ):
+            with self.subTest(operand=operand):
+                exc = self.operand_refusal(operand)
+                self.assertEqual(getattr(exc, 'filename', None), token, 'filename')
+                self.assertEqual(str(exc), "('folder_unusable', None) errno=ENOENT"
+                                           f' file={token} op=approval_seal._locked')
+
+    def test_extraction_failure_keeps_the_refusal(self):
+        with mock.patch.object(self.a, '_raising_operation',
+                               side_effect=RuntimeError('extraction')) as operation:
+            exc = self.operand_refusal('otherwise-present')
+        operation.assert_called_once()
+        self.assertEqual(exc.args, ('folder_unusable', None, 'ENOENT'))
+        self.assertEqual(str(exc), "('folder_unusable', None) errno=ENOENT")
+        self.assertIsNone(exc.filename)
+        self.assertIsNone(exc.operation)
+        self.assertEqual(self.reports, [self.t.SealReport(P, None, 'folder_unusable', 1234, 'ENOENT')])
+
+    def test_round_trip_with_source_fields(self):
+        exc = self.operand_refusal('first')
+        for rebuild in (copy.copy, lambda e: pickle.loads(pickle.dumps(e))):
+            with self.subTest(rebuild=rebuild):
+                rebuilt = rebuild(exc)
+                self.assertEqual(getattr(rebuilt, 'filename', None), 'first', 'filename')
+                self.assertEqual(getattr(rebuilt, 'operation', None), 'approval_seal._locked', 'operation')
+                fields = ('folder_unusable', None, 'ENOENT', 'first', 'approval_seal._locked')
+                self.assertEqual(rebuilt.args, fields)
+                self.assertEqual((rebuilt.cause, rebuilt.chain_id, rebuilt.errno_name,
+                                  rebuilt.filename, rebuilt.operation), fields)
+                self.assertEqual(str(rebuilt), str(exc))
+
     def test_unknown_errno_number_is_kept(self):
         with self.assertRaises(self.t.SealUnusable) as caught:
             with self.service._locked(P, exclusive=True, create=True):
                 raise OSError(99999, 'forced')
         self.assertEqual(caught.exception.errno_name, '99999')
-        self.assertEqual(str(caught.exception), "('folder_unusable', None) errno=99999")
+        self.assert_errno_suffix(caught.exception, "('folder_unusable', None) errno=99999")
+        self.assertEqual(caught.exception.operation, 'approval_seal._locked')
 
     def test_refusal_round_trips_without_errno(self):
         exc = self.t.SealUnusable('folder_unusable', None)

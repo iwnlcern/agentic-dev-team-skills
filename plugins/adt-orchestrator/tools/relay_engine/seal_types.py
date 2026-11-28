@@ -68,18 +68,27 @@ def require_canonical_id(value: str) -> str:
 
 
 class SealUnusable(Exception):
-    def __init__(self, cause: str, chain_id: str | None, errno_name: str | None = None):
+    def __init__(self, cause: str, chain_id: str | None, errno_name: str | None = None,
+                 filename: str | None = None, operation: str | None = None):
         self.cause, self.chain_id = cause, chain_id
         self.errno_name = errno_name
-        if errno_name is None:
+        self.filename, self.operation = filename, operation
+        if filename is not None or operation is not None:
+            super().__init__(cause, chain_id, errno_name, filename, operation)
+        elif errno_name is None:
             super().__init__(cause, chain_id)
         else:
             super().__init__(cause, chain_id, errno_name)
 
     def __str__(self):
-        if self.errno_name is None:
-            return super().__str__()
-        return f"{(self.cause, self.chain_id)!r} errno={self.errno_name}"
+        message = repr((self.cause, self.chain_id))
+        if self.errno_name is not None:
+            message += f" errno={self.errno_name}"
+        if self.filename is not None:
+            message += f" file={self.filename}"
+        if self.operation is not None:
+            message += f" op={self.operation}"
+        return message
 
 
 class ReserveRefused(Exception):
