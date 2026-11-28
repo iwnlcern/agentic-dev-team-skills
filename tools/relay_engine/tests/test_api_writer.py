@@ -2531,6 +2531,132 @@ class TransferModeTests(ProjectWriterFixture):
         turn.catalogue.execute("INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, 'probe', 'active', 1)",
                                ('cccccccc-cccc-4ccc-8ccc-cccccccccccc',)).close()
 
+    @staticmethod
+    def make_transfer_constraint(conn):
+        conn.execute('CREATE TABLE commit_parent (id INTEGER PRIMARY KEY)').close()
+        conn.execute(
+            'CREATE TABLE commit_child (parent INTEGER REFERENCES commit_parent(id) '
+            'DEFERRABLE INITIALLY DEFERRED)'
+        ).close()
+        return api_writer.JobOutcome(True, None)
+
+    def seed_commit_constraint(self, writer, *, catalogue=False):
+        if catalogue:
+            outcome = writer.submit_declared(self.declared(
+                lambda conns: self.make_transfer_constraint(conns['catalogue'])))
+        else:
+            outcome = writer.submit(P, self.job(self.make_transfer_constraint))
+        self.assertEqual(outcome, api_writer.JobOutcome(True, None))
+
+    @staticmethod
+    def write_deferred_violation(conn):
+        conn.execute('INSERT INTO commit_child VALUES (42)').close()
+        return api_writer.JobOutcome(True, None)
+
+    def transfer_deferred_violation(self, turn):
+        turn.open_sender_writes()
+        return self.write_deferred_violation(turn.sender)
+
+    def assert_commit_constraint(self, outcome, fault, *, indeterminate):
+        self.assertEqual(outcome, api_writer.JobOutcome(
+            False, outcome.value, indeterminate, fault))
+        self.assertIsInstance(outcome.value, sqlite3.IntegrityError)
+        self.assertEqual(outcome.value.sqlite_errorname, 'SQLITE_CONSTRAINT_FOREIGNKEY')
+
+    def assert_no_deferred_row(self, *, catalogue=False):
+        path = (store_layout.catalogue_path(self.root) if catalogue
+                else store_layout.ledger_path(self.root, P))
+        with closing(sqlite3.connect(path)) as conn, closing(
+                conn.execute('SELECT COUNT(*) FROM commit_child')) as cursor:
+            self.assertEqual(cursor.fetchone(), (0,))
+
+    def test_transfer_deferred_constraint_commit_is_commit_failed(self):
+        writer = self.writer()
+        self.seed_commit_constraint(writer)
+        outcome = self.transfer(writer, self.transfer_deferred_violation)
+        self.assert_no_deferred_row()
+        self.assert_commit_constraint(outcome, 'commit_failed', indeterminate=False)
+
+    def test_transfer_commit_effect_then_raise_is_commit_unknown(self):
+        writer = self.writer()
+        real_commit = api_writer._commit_sender
+        error = sqlite3.IntegrityError('observed after COMMIT')
+
+        def commit_then_raise(conn):
+            real_commit(conn)
+            raise error
+
+        with mock.patch.object(api_writer, '_commit_sender', side_effect=commit_then_raise) as commit:
+            outcome = self.transfer(writer, self.write)
+        commit.assert_called_once()
+        self.assertIs(outcome.value, error)
+        self.assertEqual(outcome, api_writer.JobOutcome(False, error, True, 'commit_unknown'))
+        self.assertEqual(self.value(), 'after')
+
+    def test_transfer_commit_failed_with_cleanup_failure_stays_commit_unknown(self):
+        writer = self.writer()
+        self.seed_commit_constraint(writer)
+        real_cleanup = writer._cleanup_transfer_connections
+
+        def cleanup_with_failure(*args, **kwargs):
+            failures = real_cleanup(*args, **kwargs)
+            self.assertEqual(failures, {})
+            return {P: sqlite3.OperationalError('observed cleanup failure')}
+
+        with mock.patch.object(writer, '_cleanup_transfer_connections',
+                               side_effect=cleanup_with_failure) as cleanup:
+            outcome = self.transfer(writer, self.transfer_deferred_violation)
+        cleanup.assert_called_once()
+        self.assert_commit_constraint(outcome, 'commit_unknown', indeterminate=True)
+        self.assert_no_deferred_row()
+
+    def test_job_and_declared_deferred_constraint_commit_stay_commit_unknown(self):
+        from types import SimpleNamespace
+
+        writer = self.writer()
+        self.seed_commit_constraint(writer)
+        self.seed_commit_constraint(writer, catalogue=True)
+        writer.bind_service_owner(None, SimpleNamespace(attempt=None, admission_closed=False))
+        with self.subTest(runner='job'):
+            outcome = writer.submit(P, self.job(self.write_deferred_violation))
+            self.assert_commit_constraint(outcome, 'commit_unknown', indeterminate=True)
+            self.assert_no_deferred_row()
+        with self.subTest(runner='declared'):
+            outcome = writer.submit_declared(self.declared(
+                lambda conns: self.write_deferred_violation(conns['catalogue'])))
+            self.assert_commit_constraint(outcome, 'commit_unknown', indeterminate=True)
+            self.assert_no_deferred_row(catalogue=True)
+
+    def test_transfer_unreadable_state_is_commit_unknown_and_cleans_up(self):
+        writer = self.writer()
+        self.seed_commit_constraint(writer)
+        real_commit = api_writer._commit_sender
+        errors, senders = [], []
+
+        def commit(conn):
+            try:
+                real_commit(conn)
+            except sqlite3.IntegrityError as error:
+                errors.append(error)
+                raise
+
+        def write(turn):
+            senders.append(turn.sender)
+            return self.transfer_deferred_violation(turn)
+
+        with (mock.patch.object(api_writer, '_commit_sender', side_effect=commit),
+              mock.patch.object(api_writer, '_sender_in_transaction',
+                                side_effect=sqlite3.ProgrammingError('transaction state unreadable')) as state):
+            outcome = self.transfer(writer, write)
+        state.assert_called_once()
+        self.assert_commit_constraint(outcome, 'commit_unknown', indeterminate=True)
+        self.assertEqual(len(errors), 1)
+        self.assertIs(outcome.value, errors[0])
+        self.assertEqual(len(senders), 1)
+        with self.assertRaises(api_writer.TurnClosed):
+            senders[0].execute('SELECT 1')
+        self.assert_no_deferred_row()
+
     def test_transfer_commits_only_the_sender(self):
         writer = self.writer_pair()
         trace = []

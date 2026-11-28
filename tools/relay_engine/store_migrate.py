@@ -58,6 +58,21 @@ class CutoverStarted(ValueError):
     """A validated migration cannot be rebuilt after cutover starts."""
 
 
+class RestoreOpen(ValueError):
+    """A restore is open at the migration's hold or route step."""
+
+    def __init__(self, job_id: str):
+        self.job_id = job_id
+        super().__init__(f'{job_id}: this job is not finished: restart the engine to finish it, or '
+                         'abandon it if it has stopped for you')
+
+
+def _refuse_open_restore(root):
+    opened = store_backup.open_restores(root)
+    if opened:
+        raise RestoreOpen(opened[0])
+
+
 class HoldMissing(ValueError):
     """A migration operation lacks the maintenance hold it requires."""
 
@@ -946,6 +961,20 @@ def _cutover_marker(data, job, journal, index, item, expected):
     store_steps.advance_marker(journal, target, preimage)
 
 
+class _CutoverBackupTurns:
+    def __init__(self, turns: store_steps.TurnRunner, root):
+        self._turns = turns
+        self._root = root
+
+    def run(self, declared, body, **kwargs):
+        # Discovery, retry reads and fault probes don't take jobs.lock.
+        if declared.catalogue != 'written':
+            return self._turns.run(declared, body, **kwargs)
+        # Cover the delegated transaction through commit or rollback.
+        with store_backup.jobs_lock(self._root):
+            return self._turns.run(declared, body, **kwargs)
+
+
 def cutover(root, turns: store_steps.TurnRunner, job_id: str, now_ms: int) -> None:
     """Back up, reserve, move, mark, activate and release a validated migration."""
     root = store_layout.resolve_root(root)
@@ -1021,6 +1050,7 @@ def cutover(root, turns: store_steps.TurnRunner, job_id: str, now_ms: int) -> No
                     nonlocal backup
                     cat = conns['catalogue']
                     check(cat)
+                    _refuse_open_restore(root)
                     _cutover_before_reserve(cat, data, root)
                     observed = _cutover_holders(cat, scopes)
                     if observed:
@@ -1038,8 +1068,9 @@ def cutover(root, turns: store_steps.TurnRunner, job_id: str, now_ms: int) -> No
                     last = store_backup.last_complete(root, 'before-move')
                     stamp = now_ms if last is None else max(now_ms, last + 1)
                     try:
-                        store_backup.backup(turns, root, 'before-move', stamp,
-                                           then_hold=(job_id, 'cutover', scopes), before=before_backup)
+                        store_backup.backup(_CutoverBackupTurns(turns, root), root, 'before-move',
+                                            stamp, then_hold=(job_id, 'cutover', scopes),
+                                            before=before_backup)
                     except store_backup.BackupRefused as error:
                         if error.reason == 'creation-pending':
                             holder = turn('read', lambda cat: store_layout.name_holder(cat, name),
@@ -1220,6 +1251,7 @@ def undo(root, turns: store_steps.TurnRunner, job_id: str, *,
                 def route_and_queue(conns):
                     nonlocal route_intent
                     cat = checked_cat(conns)
+                    _refuse_open_restore(root)
                     current = observe(cat)
                     if current != before:
                         raise store_steps.StepStateUnknown(before, after, current)
@@ -1235,8 +1267,9 @@ def undo(root, turns: store_steps.TurnRunner, job_id: str, *,
                     store_layout.return_to_creating(cat, project, job_id)
 
                 try:
-                    turns.run(store_steps.Declared('written', {project: 'read'}), route_and_queue,
-                              fence_project=project)
+                    with store_backup.jobs_lock(root):
+                        turns.run(store_steps.Declared('written', {project: 'read'}), route_and_queue,
+                                  fence_project=project)
                 except UndoRefused as error:
                     items = json.loads(json.dumps(error.items, default=_undo_item_data))
                     refusal = {'route_intent': route_intent.id, 'reason': error.reason, 'items': items}
@@ -1319,3 +1352,265 @@ def _undo_root(data, job, journal, index, item, expected):
         _match_fingerprint(path, expected, _fingerprint(path, {}))
     except LegacySourceLink as error:
         raise NotQuiet(str(error)) from error
+
+
+@dataclass(frozen=True)
+class UnmarkConfirmation:
+    job_id: str
+    project_name: str
+    store_id: str
+    route_state: str
+    owner_job: str | None
+
+
+@dataclass(frozen=True)
+class UnmarkResult:
+    lapsed: bool
+    store_id: str | None = None
+    route_state: str | None = None
+    owner_job: str | None = None
+    detail: str | None = None
+
+
+def _unmark_route(cat, confirmation):
+    route = _cutover_route(cat, confirmation.project_name)
+    return (_identity(cat), 'not-found' if route is None else route[1],
+            None if route is None else route[2])
+
+
+def _unmark_source_manifest(source, orphan):
+    _, data = source.last_checkpoint()
+    targets = tuple(store_steps.MarkerTarget(
+        data['store_id'], data['job_id'], orphan, index, item['root_uuid'], item['path'],
+    ) for index, item in enumerate(data['roots']))
+    bindings = {target.root_index: store_steps._marker_binding(target) for target in targets}
+    labels = ','.join('?' for _ in store_steps._MARKER_SEQUENCE)
+    rows = source._conn.execute(
+        f'SELECT target FROM intents WHERE step IN ({labels}) ORDER BY id',
+        store_steps._MARKER_SEQUENCE)
+    try:
+        for raw, in rows:
+            encoded = json.loads(raw)
+            binding = bindings.get(encoded['root_index'])
+            if binding is None or any(encoded.get(key) != value for key, value in binding.items()):
+                raise store_steps.StepStateUnknown('manifest-bound marker history', 'valid root',
+                                                   encoded.get('root_path', str(orphan)))
+    finally:
+        rows.close()
+    return data, targets
+
+
+def unmark_after_restore(root, turns: store_steps.TurnRunner, confirmation: UnmarkConfirmation,
+                         unmark_job_id: str, now_ms: int) -> UnmarkResult:
+    """Restore only the confirmed orphan's marked roots, via a separate inverse journal."""
+    if not isinstance(confirmation, UnmarkConfirmation):
+        return UnmarkResult(True, detail='unmarking needs operator confirmation')
+    root = store_layout.resolve_root(root)
+    old_job = store_layout._canonical_job(confirmation.job_id)
+    unmark_id = store_layout._canonical_job(unmark_job_id)
+    expected = (confirmation.store_id, confirmation.route_state, confirmation.owner_job)
+
+    def lapsed(observed, detail):
+        return UnmarkResult(True, *observed, detail)
+
+    def route_now(conns):
+        return _unmark_route(conns['catalogue'], confirmation)
+
+    def allowed(observed):
+        return observed == expected and (observed[1:] == ('not-found', None)
+                                         or observed[1:] == ('creating', unmark_id))
+
+    observed = turns.run(store_steps.Declared('read', {}), route_now)
+    if not allowed(observed):
+        return lapsed(observed, 'the confirmed Store or route has changed')
+    orphan = root / 'migrations' / old_job
+    unmark = root / 'migrations' / unmark_id
+    if old_job == unmark_id or any(p.is_symlink() for p in (orphan.parent, orphan, unmark)):
+        return lapsed(observed, 'unmark journal must be separate from its source')
+    unmark = store_steps.migration_dir(root, unmark_id)
+    db = unmark / 'job.sqlite3'
+    if os.path.lexists(db):
+        meta = db.lstat()
+        if not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1:
+            raise store_steps.StepStateUnknown('separate unmark journal', 'ordinary file', str(db))
+    with closing(store_steps.open_journal(unmark, create=True)) as journal:
+        recorded = {}
+        with closing(journal._conn.execute('SELECT phase,data FROM checkpoints ORDER BY id')) as rows:
+            for label, raw in rows:
+                if label in recorded:
+                    raise ValueError(f'duplicate unmark checkpoint: {label}')
+                recorded[label] = json.loads(raw)
+        if recorded and 'unmark-confirmation' not in recorded:
+            raise ValueError('journal is not an unmark job')
+        if 'unmark-confirmation' not in recorded:
+            journal.checkpoint('unmark-confirmation', vars(confirmation))
+        elif recorded['unmark-confirmation'] != vars(confirmation):
+            return lapsed(observed, 'unmark job already binds a different confirmation')
+        if 'unmark-refused' in recorded:
+            return lapsed(observed, recorded['unmark-refused'])
+
+        def bind_source(source):
+            data, targets = _unmark_source_manifest(source, orphan)
+            if (data['job_id'] != old_job or data['project_name'] != confirmation.project_name
+                    or data['store_id'] == confirmation.store_id):
+                raise ValueError('confirmation does not name an orphaned migration for this project')
+            return data, targets
+
+        if 'unmark-source' not in recorded:
+            try:
+                snapshot = store_steps.snapshot_source(orphan, unmark)
+                source = store_steps.open_source(snapshot, unmark)
+                try:
+                    data, targets = bind_source(source)
+                    marked = []
+                    for target in targets:
+                        try:
+                            phase = store_steps.source_marker_phase(source, target)
+                        except store_steps.StepStateUnknown as error:
+                            raise ValueError(f'{target.root_path}: {error}') from error
+                        if phase == 'unfinished':
+                            raise ValueError(f'unfinished forward work: {target.root_path}')
+                        if phase == 'marked':
+                            marked.append(target.root_index)
+                    if not marked:
+                        raise ValueError('no marked roots to restore')
+                finally:
+                    store_steps.close_source(source)
+            except (OSError, TypeError, ValueError, KeyError, store_steps.StepStateUnknown) as error:
+                journal.checkpoint('unmark-refused', str(error))
+                return lapsed(observed, str(error))
+            record = dict(snapshot=vars(snapshot), targets=marked)
+            journal.checkpoint('unmark-source', record)
+        else:
+            record = recorded['unmark-source']
+            snapshot = store_steps.SourceSnapshot(**record['snapshot'])
+        marked = record['targets']
+        if not marked or list(marked) != sorted(set(marked)):
+            raise ValueError('invalid pinned unmark target set')
+
+        @contextmanager
+        def bound_source():
+            source = store_steps.open_source(snapshot, unmark)
+            try:
+                data, targets = bind_source(source)
+                yield source, data, tuple(targets[index] for index in marked)
+            finally:
+                store_steps.close_source(source)
+
+        with bound_source() as (_, data, targets):
+            scopes = sorted({store_layout.project_scope(data['project_id']),
+                             *(store_layout.root_scope(target.root_uuid) for target in targets)})
+        required = frozenset(scopes)
+        holds_intent, holds_done = _cutover_log(journal, 'unmark-holds')
+        release_intent, release_done = _cutover_log(journal, 'unmark-release')
+        if holds_intent is not None and (holds_intent.target, holds_intent.before, holds_intent.after) != (
+                unmark_id, [], scopes):
+            raise ValueError('unmark hold intent does not bind the pinned scopes')
+        if release_intent is not None and (
+                release_intent.target, release_intent.before, release_intent.after) != (
+                unmark_id, scopes, []):
+            raise ValueError('unmark release intent does not bind the pinned scopes')
+
+        def checked(conns, *, require_holds=True):
+            cat = conns['catalogue']
+            current = _unmark_route(cat, confirmation)
+            if not allowed(current):
+                return cat, lapsed(current, 'the confirmed Store or route has changed')
+            if require_holds and store_layout.holds_of(cat, unmark_id) != required:
+                raise HoldMissing(f'unmark holds missing for migration {unmark_id}')
+            return cat, None
+
+        def release(refusal=False):
+            nonlocal release_intent
+
+            def turn(conns):
+                nonlocal release_intent
+                cat, stale = checked(conns, require_holds=False)
+                if stale is not None:
+                    return stale
+                held = store_layout.holds_of(cat, unmark_id)
+                if release_intent is not None and not held:
+                    return None
+                if held != required:
+                    raise HoldMissing(f'unmark holds missing for migration {unmark_id}')
+                if release_intent is None:
+                    release_intent = _cutover_intent(journal, 'unmark-release', unmark_id, scopes, [])
+                if store_layout.release_holds(cat, unmark_id) != len(required):
+                    raise HoldMissing(f'unmark holds missing for migration {unmark_id}')
+                return None
+            stale = turns.run(store_steps.Declared('written', {}), turn)
+            if stale is not None:
+                return stale
+            journal.receipt(release_intent.id, [])
+            if refusal:
+                return lapsed(observed, refusal)
+            return UnmarkResult(False, *observed)
+
+        if release_done:
+            refusal = recorded.get('unmark-validation-refused')
+            return lapsed(observed, refusal) if refusal else UnmarkResult(False, *observed)
+        if release_intent is not None or 'unmark-validation-refused' in recorded:
+            return release(recorded.get('unmark-validation-refused', False))
+
+        if not holds_done:
+            hold_id = holds_intent.id if holds_intent is not None else None
+
+            def acquire(conns):
+                nonlocal hold_id
+                cat, stale = checked(conns, require_holds=False)
+                if stale is not None:
+                    return stale
+                held = store_layout.holds_of(cat, unmark_id)
+                if hold_id is not None and held == required:
+                    return None
+                if held:
+                    raise HoldMissing(f'unmark holds differ for migration {unmark_id}')
+                if hold_id is None:
+                    hold_id = journal.intent('unmark-holds', unmark_id, [], scopes)
+                store_layout.take_holds(cat, unmark_id, 'unmark', scopes, now_ms)
+                return None
+
+            try:
+                stale = turns.run(store_steps.Declared('written', {}), acquire)
+            except store_layout.HoldConflict as error:
+                journal.checkpoint('unmark-refused', str(error))
+                return lapsed(observed, str(error))
+            if stale is not None:
+                return stale
+            journal.receipt(hold_id, scopes)
+
+        def validate(conns):
+            _, stale = checked(conns)
+            if stale is not None:
+                return stale
+            with bound_source() as (source, _, targets):
+                for target in targets:
+                    if store_steps.adopted_root_check(source, journal, target) == 'other':
+                        raise store_steps.StepStateUnknown('bound marker or inverse', 'exact preimage',
+                                                           str(target.root_path))
+            return None
+
+        try:
+            stale = turns.run(store_steps.Declared('read', {}), validate)
+        except store_steps.StepStateUnknown as error:
+            inverse = store_layout._row(journal._conn,
+                                       "SELECT 1 FROM intents WHERE step='inverse-unplace' LIMIT 1")
+            if inverse is None:
+                journal.checkpoint('unmark-validation-refused', str(error))
+                release(str(error))
+            raise
+        if stale is not None:
+            return stale
+
+        for index in range(len(marked)):
+            def advance(conns):
+                _, stale = checked(conns)
+                if stale is not None:
+                    return stale
+                with bound_source() as (source, _, targets):
+                    store_steps.advance_adopted_inverse(source, journal, targets[index])
+                return None
+            stale = turns.run(store_steps.Declared('read', {}), advance)
+            if stale is not None:
+                return stale
+        return release()

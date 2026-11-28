@@ -19,6 +19,17 @@ _ALGORITHM = b'ssh-ed25519'
 _KEY_PATH = '/opt/adt-operator/operator-check.pub'
 _MAX_FRAME = 4096
 
+PURPOSES = (
+    'engine_stop', 'engine_start', 'project_stop', 'project_start',
+    'restore', 'adopt_restored', 'abandonment',
+    'new_folder_pass', 'answer_5d', 'report_confirmation',
+    'authority.set_reapproval', 'authority.release_restore',
+    'authority.assign_reviewer', 'authority.unbind_branch',
+    'queue.answer', 'queue.open', 'queue.dismiss', 'queue.dismiss_all',
+    'checkout_register', 'checkout_unregister', 'queue.go_ahead_without_review',
+    'queue.waive_verification', 'slip.revoke', 'slip.reissue', 'seat_unseat',
+)
+
 
 class OperatorCheckRefused(Exception):
     def __init__(self, reason: str, detail: str | None = None):

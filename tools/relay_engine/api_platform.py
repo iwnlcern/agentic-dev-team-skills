@@ -53,9 +53,10 @@ def platform_component() -> api_compose.ApiComponent:
 
 
 def platform_components() -> tuple[api_compose.ApiComponent, ...]:
+    from relay_engine.api_terminal import TerminalActs, terminal_component
     from relay_engine.operator_queue.component import queue_component
 
-    return (platform_component(), queue_component())
+    return (platform_component(), queue_component(), terminal_component(TerminalActs()))
 
 
 def build_platform() -> PlatformBuild:

@@ -15,7 +15,7 @@ from unittest import mock
 from urllib.parse import unquote, urlsplit
 import uuid
 
-from relay_engine import jcs, store_import, store_layout, store_steps
+from relay_engine import jcs, store_backup, store_import, store_layout, store_steps
 
 
 NOW_MS = 1_790_000_000_000
@@ -1679,6 +1679,283 @@ class StoreMigrationCopyTests(unittest.TestCase):
         return turns.run(store_steps.Declared('read', {}), lambda c: store_layout._row(
             c['catalogue'], 'SELECT state, held_by_job FROM project_routes WHERE project_id=?', (project,)))
 
+    def _unmark_fixture(self, label, shape='marked'):
+        from relay_engine import store_backup
+
+        migrate = self.producer('unmark_after_restore')
+        call = migrate.unmark_after_restore
+        migrate, root, turns, _, old_job = self._cutover_fixture(label, paired=True)
+        _, data = self.checkpoint(root, old_job)
+        paths = tuple(Path(item['path']) for item in data['roots'])
+        preimages = [self._undo_files(path / '.engine') for path in paths]
+        advance = store_steps.advance_marker
+        if shape == 'marked':
+            migrate.cutover(root, turns, old_job, NOW_MS + 1)
+        else:
+            def stop_second(journal, target, preimage):
+                if target.root_index == 0:
+                    return advance(journal, target, preimage)
+                if shape == 'unfinished':
+                    while True:
+                        step = store_steps.write_marker_intent(journal, target, preimage)
+                        store_steps.resume_marker(journal, step, target)
+                        if step.step == 'marker-aside':
+                            break
+                raise InterruptedCopy()
+            with mock.patch.object(store_steps, 'advance_marker', side_effect=stop_second):
+                with self.assertRaises(InterruptedCopy):
+                    migrate.cutover(root, turns, old_job, NOW_MS + 1)
+        backup, = (root / 'backups').glob('*-before-move')
+        store_layout.catalogue_path(root).unlink()
+        shutil.rmtree(root / 'projects')
+        report = store_backup.restore(root, backup, self._unmark_job_id(), serving_stopped=True,
+                                      confirm=True, now_ms=NOW_MS + 2)
+        current = store_steps.DirectTurns(root)
+        confirmation = migrate.UnmarkConfirmation(old_job, data['project_name'], report.new_store_id,
+                                                   'not-found', None)
+        job = self._unmark_job_id()
+        return call, root, current, confirmation, job, data['project_id'], paths, preimages
+
+    @staticmethod
+    def _unmark_job_id():
+        from relay_engine import submit
+        return submit.new_uuid7(NOW_MS + 2)
+
+    @staticmethod
+    def _unmark_run(fixture):
+        call, root, turns, confirmation, job, *_ = fixture
+        return call(root, turns, confirmation, job, NOW_MS + 3)
+
+    @staticmethod
+    def _unmark_inventory(path):
+        return {member.relative_to(path): (member.lstat().st_ino, member.lstat().st_mode,
+                                           None if member.is_dir() else member.read_bytes())
+                for member in (path, *path.rglob('*'))}
+
+    def _assert_unmarked(self, fixture):
+        _, _, turns, _, job, _, paths, preimages = fixture
+        for path, preimage in zip(paths, preimages, strict=True):
+            self.assertEqual(self._undo_files(path / '.engine'), preimage)
+            self.assertFalse((path / '.engine.migrated-to-v3').exists())
+        self.assertFalse(self._cutover_holds(turns, job))
+
+    def _unmark_cut(self, step, operation, *, after_receipt=False):
+        receipt = store_steps.Journal.receipt
+        effect = store_steps._marker_effect
+        hit = False
+        if after_receipt:
+            def cut(j, ident, observed):
+                nonlocal hit
+                result = receipt(j, ident, observed)
+                row = store_layout._row(j._conn, 'SELECT step FROM intents WHERE id=?', (ident,))
+                if not hit and row == (step,):
+                    hit = True
+                    raise InterruptedCopy()
+                return result
+            patch = mock.patch.object(store_steps.Journal, 'receipt', cut)
+        else:
+            def cut(root, fd, intent):
+                nonlocal hit
+                result = effect(root, fd, intent)
+                if not hit and intent.step == step:
+                    hit = True
+                    raise InterruptedCopy()
+                return result
+            patch = mock.patch.object(store_steps, '_marker_effect', side_effect=cut)
+        with patch, self.assertRaises(InterruptedCopy):
+            operation()
+        self.assertTrue(hit)
+
+    def test_unmark_root_controls(self):
+        from dataclasses import replace
+        for case in ('unconfirmed', 'wrong-project', 'changed-marker', 'missing-preimage', 'intact'):
+            with self.subTest(case=case):
+                f = self._unmark_fixture(case)
+                call, root, turns, confirmation, job, _, paths, _ = f
+                if case == 'changed-marker':
+                    (paths[0] / '.engine' / 'MIGRATED.md').chmod(0o600) if (
+                        paths[0] / '.engine' / 'MIGRATED.md').exists() else (
+                        paths[0] / '.engine').chmod(0o700)
+                if case == 'missing-preimage':
+                    old = root / 'migrations' / confirmation.job_id / 'originals/0/manifest.json'
+                    old.unlink()
+                before = [self._unmark_inventory(path) for path in paths]
+                if case in ('unconfirmed', 'wrong-project'):
+                    value = None if case == 'unconfirmed' else replace(confirmation, project_name='different')
+                    out = call(root, turns, value, job, NOW_MS + 3)
+                    self.assertTrue(out.lapsed)
+                elif case == 'changed-marker':
+                    with self.assertRaises(store_steps.StepStateUnknown):
+                        self._unmark_run(f)
+                elif case == 'missing-preimage':
+                    self.assertTrue(self._unmark_run(f).lapsed)
+                else:
+                    self.assertFalse(self._unmark_run(f).lapsed)
+                    self._assert_unmarked(f)
+                    continue
+                self.assertEqual([self._unmark_inventory(path) for path in paths], before)
+                self.assertFalse(self._cutover_holds(turns, job))
+
+    def test_unmark_confirmation_binding(self):
+        from relay_engine import store_backup
+        for switch in ('restore', 'route'):
+            with self.subTest(switch=switch):
+                f = self._unmark_fixture('binding-' + switch)
+                call, root, turns, confirmation, job, project, paths, _ = f
+                old = [self._unmark_inventory(path) for path in paths]
+                if switch == 'restore':
+                    backup, = (root / 'backups').glob('*-before-move')
+                    report = store_backup.restore(root, backup, self._unmark_job_id(),
+                                                  serving_stopped=True, confirm=True,
+                                                  now_ms=NOW_MS + 3)
+                    self.assertNotEqual(report.new_store_id, confirmation.store_id)
+                else:
+                    other = self._unmark_job_id()
+                    turns.run(store_steps.Declared('written', {}), lambda conns:
+                              store_layout.reserve_project(conns['catalogue'], project,
+                                  confirmation.project_name, NOW_MS + 3, held_by_job=other))
+                result = call(root, turns, confirmation, job, NOW_MS + 4)
+                self.assertTrue(result.lapsed)
+                if switch == 'restore':
+                    self.assertEqual(result.store_id, report.new_store_id)
+                else:
+                    self.assertEqual((result.route_state, result.owner_job), ('creating', other))
+                self.assertFalse(self._cutover_holds(turns, job))
+                self.assertEqual([self._unmark_inventory(path) for path in paths], old)
+
+    def test_unmark_vs_new_job(self):
+        f = self._unmark_fixture('new-job')
+        _, _, turns, _, job, project, paths, _ = f
+        other = self._unmark_job_id()
+        scope = store_layout.project_scope(project)
+        def take(conns):
+            store_layout.take_holds(conns['catalogue'], other, 'cutover', [scope], NOW_MS + 3)
+        turns.run(store_steps.Declared('written', {}), take)
+        before = [self._unmark_inventory(path) for path in paths]
+        self.assertTrue(self._unmark_run(f).lapsed)
+        self.assertEqual([self._unmark_inventory(path) for path in paths], before)
+        self.assertFalse(self._cutover_holds(turns, job))
+        def release(conns):
+            store_layout.release_holds(conns['catalogue'], other)
+        turns.run(store_steps.Declared('written', {}), release)
+        f = self._unmark_fixture('lost-hold')
+        self._unmark_cut('inverse-unplace', lambda: self._unmark_run(f), after_receipt=True)
+        _, _, turns, _, job, _, paths, _ = f
+        before = [self._unmark_inventory(path) for path in paths]
+        turns.run(store_steps.Declared('written', {}), lambda conns:
+                  store_layout.release_holds(conns['catalogue'], job))
+        with self.assertRaises(self.producer('unmark').HoldMissing):
+            self._unmark_run(f)
+        self.assertEqual([self._unmark_inventory(path) for path in paths], before)
+
+    def test_unmark_shared_root_interleave(self):
+        f = self._unmark_fixture('shared-root')
+        paths = f[-2]
+        marker = paths[1] / '.engine'
+        other = paths[1] / 'external-marker'
+        take = store_layout.take_holds
+        expected = []
+        def interleave(cat, job_id, kind, scopes, since):
+            marker.rename(other)
+            shutil.copytree(other, marker)
+            expected.extend(self._unmark_inventory(path) for path in paths)
+            return take(cat, job_id, kind, scopes, since)
+        with mock.patch.object(store_layout, 'take_holds', side_effect=interleave):
+            with self.assertRaises(store_steps.StepStateUnknown):
+                self._unmark_run(f)
+        self.assertEqual([self._unmark_inventory(path) for path in paths], expected)
+
+    def test_unmark_partial_resume(self):
+        f = self._unmark_fixture('partial')
+        paths = f[-2]
+        self._unmark_cut('dispose-clear', lambda: self._unmark_run(f), after_receipt=True)
+        first = self._unmark_inventory(paths[0])
+        engine = paths[0] / '.engine'
+        original = engine.stat().st_mode & 0o777
+        engine.chmod(original ^ 0o100)
+        second = self._unmark_inventory(paths[1])
+        with self.assertRaises(store_steps.StepStateUnknown):
+            self._unmark_run(f)
+        self.assertEqual(self._unmark_inventory(paths[1]), second)
+        engine.chmod(original)
+        self.assertFalse(self._unmark_run(f).lapsed)
+        self.assertEqual(self._unmark_inventory(paths[0]), first)
+        self._assert_unmarked(f)
+
+    def test_unmark_crash_between_inverse_steps(self):
+        f = self._unmark_fixture('between-steps')
+        self._unmark_cut('inverse-unplace', lambda: self._unmark_run(f), after_receipt=True)
+        _, _, turns, _, job, _, paths, _ = f
+        self.assertTrue(self._cutover_holds(turns, job))
+        self.assertFalse((paths[0] / '.engine').exists())
+        self.assertTrue((paths[1] / '.engine.migrated-to-v3').exists())
+        self.assertFalse(self._unmark_run(f).lapsed)
+        self._assert_unmarked(f)
+
+    def test_unmark_crash_effect_before_receipt(self):
+        f = self._unmark_fixture('before-receipt')
+        _, root, _, confirmation, _, _, paths, _ = f
+        old_job = root / 'migrations' / confirmation.job_id
+        before = self._unmark_inventory(old_job)
+        self._unmark_cut('inverse-restore', lambda: self._unmark_run(f))
+        inode = (paths[0] / '.engine').stat().st_ino
+        self.assertEqual(self._unmark_inventory(old_job), before)
+        self.assertFalse(self._unmark_run(f).lapsed)
+        self.assertEqual((paths[0] / '.engine').stat().st_ino, inode)
+        self.assertEqual(self._unmark_inventory(old_job), before)
+        self._assert_unmarked(f)
+
+    def test_unmark_one_of_two_marked(self):
+        f = self._unmark_fixture('one-of-two', 'none')
+        _, _, turns, _, job, project, paths, preimages = f
+        untouched = self._unmark_inventory(paths[1])
+        take = store_layout.take_holds
+        observed = []
+        def note(cat, owner, kind, scopes, since):
+            if owner == job:
+                observed.extend(scopes)
+            return take(cat, owner, kind, scopes, since)
+        with mock.patch.object(store_layout, 'take_holds', side_effect=note):
+            self.assertFalse(self._unmark_run(f).lapsed)
+        self.assertEqual(len(observed), 2)
+        self.assertIn(store_layout.project_scope(project), observed)
+        self.assertEqual(self._undo_files(paths[0] / '.engine'), preimages[0])
+        self.assertEqual(self._unmark_inventory(paths[1]), untouched)
+        self.assertFalse(self._cutover_holds(turns, job))
+
+    def test_unmark_refuses_unfinished_forward(self):
+        f = self._unmark_fixture('unfinished', 'unfinished')
+        _, _, turns, _, job, _, paths, _ = f
+        before = [self._unmark_inventory(path) for path in paths]
+        with mock.patch.object(store_layout, 'take_holds', wraps=store_layout.take_holds) as take:
+            result = self._unmark_run(f)
+        self.assertTrue(result.lapsed)
+        self.assertIn(str(paths[1]), result.detail)
+        take.assert_not_called()
+        self.assertFalse(self._cutover_holds(turns, job))
+        self.assertEqual([self._unmark_inventory(path) for path in paths], before)
+
+    def test_unmark_validates_every_root_before_any_effect(self):
+        for change in ('inode', 'sibling'):
+            with self.subTest(change=change):
+                f = self._unmark_fixture('validate-' + change)
+                _, root, _, confirmation, _, _, paths, _ = f
+                if change == 'inode':
+                    marker = paths[1] / '.engine'
+                    other = paths[1] / 'superseded-marker'
+                    marker.rename(other)
+                    shutil.copytree(other, marker)
+                else:
+                    import json
+                    with closing(store_steps.open_journal(root / 'migrations' / confirmation.job_id)) as j:
+                        row = store_layout._row(j._conn,
+                            "SELECT target FROM intents WHERE step='marker-place' ORDER BY id DESC LIMIT 1")
+                        (paths[1] / json.loads(row[0])['slots']['sibling']).mkdir()
+                before = [self._unmark_inventory(path) for path in paths]
+                with self.assertRaises(store_steps.StepStateUnknown):
+                    self._unmark_run(f)
+                self.assertEqual([self._unmark_inventory(path) for path in paths], before)
+
     def test_undo_restores_roots(self):
         migrate, root, turns, legacy, job_id, project, preimage = self._undo_fixture(
             'undo-clean', paired=True)
@@ -1961,6 +2238,204 @@ class StoreMigrationCopyTests(unittest.TestCase):
             migrate.cutover(root, turns, job_id, NOW_MS + 1)
         self.assertFalse((job / 'originals').exists())
         self.assertFalse((legacy / '.engine.migrated-to-v3').exists())
+
+    def _open_restore_journal(self, root):
+        restore_job = PRIOR_JOB
+        folder = store_steps.recovery_dir(root, restore_job)
+        with closing(store_steps.open_journal(folder, create=True)) as journal:
+            journal.checkpoint('restore-start', {'job_id': restore_job, 'mode': 'readable',
+                                                 'store_id': PRIOR_STORE})
+        return restore_job, folder
+
+    def _migration_journal_rows(self, root, job_id):
+        with closing(store_steps.open_journal(self.job_path(root, job_id))) as journal:
+            result = []
+            for statement in ('SELECT * FROM checkpoints ORDER BY id',
+                              'SELECT * FROM intents ORDER BY id',
+                              'SELECT * FROM receipts ORDER BY intent_id'):
+                with closing(journal._conn.execute(statement)) as rows:
+                    result.append(rows.fetchall())
+            return result
+
+    def _assert_open_restore(self, migrate, restore_job, action):
+        with self.assertRaises(migrate.RestoreOpen) as caught:
+            action()
+        self.assertIsInstance(caught.exception, ValueError)
+        self.assertEqual(caught.exception.job_id, restore_job)
+        self.assertIn(restore_job, str(caught.exception))
+        self.assertIn('this job is not finished: restart the engine to finish it, or '
+                      'abandon it if it has stopped for you', str(caught.exception))
+
+    def test_cutover_refuses_open_restore(self):
+        migrate, root, turns, _, job_id = self._cutover_fixture('open-restore-cutover')
+        restore_job, folder = self._open_restore_journal(root)
+        self.assertEqual(store_backup.open_restores(root), (restore_job,))
+        before = self._migration_journal_rows(root, job_id)
+        action = lambda: migrate.cutover(root, turns, job_id, NOW_MS + 1)
+        self._assert_open_restore(migrate, restore_job, action)
+        self.assertFalse(self._cutover_holds(turns, job_id))
+        self.assertEqual(self._migration_journal_rows(root, job_id), before)
+
+        with closing(store_steps.open_journal(folder)) as journal:
+            journal.checkpoint('restore-done', True)
+        self.assertEqual(store_backup.open_restores(root), ())
+        action()
+        self.assertEqual(self.checkpoint(root, job_id)[0], 'cutover')
+
+    def test_undo_refuses_open_restore(self):
+        migrate, root, turns, _, job_id, project, _ = self._undo_fixture('open-restore-undo')
+        restore_job, folder = self._open_restore_journal(root)
+        self.assertEqual(store_backup.open_restores(root), (restore_job,))
+        before = self._migration_journal_rows(root, job_id)
+        action = lambda: self._undo_call(migrate, root, turns, job_id)
+        self._assert_open_restore(migrate, restore_job, action)
+        self.assertEqual(self._migration_journal_rows(root, job_id), before)
+        self.assertFalse(self._cutover_holds(turns, job_id))
+        self.assertEqual(self._cutover_route(turns, project), 'active')
+
+        with closing(store_steps.open_journal(folder)) as journal:
+            journal.checkpoint('restore-done', True)
+        self.assertEqual(store_backup.open_restores(root), ())
+        action()
+        self.assertEqual(self.checkpoint(root, job_id)[0], 'undo')
+
+    def test_cutover_undo_take_jobs_lock(self):
+        for name in ('cutover', 'undo'):
+            with self.subTest(name=name):
+                if name == 'cutover':
+                    migrate, root, turns, _, job_id = self._cutover_fixture('jobs-lock-cutover')
+                    action = lambda: migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                else:
+                    migrate, root, turns, _, job_id, _, _ = self._undo_fixture('jobs-lock-undo')
+                    action = lambda: self._undo_call(migrate, root, turns, job_id)
+
+                before = self._migration_journal_rows(root, job_id)
+                real_lock = store_backup.jobs_lock
+                with real_lock(root):
+                    with mock.patch.object(store_backup, 'jobs_lock',
+                                           side_effect=lambda path: real_lock(path, wait_s=0)):
+                        with self.assertRaises(store_backup.JobsBusy):
+                            action()
+                self.assertEqual(self._migration_journal_rows(root, job_id), before)
+                self.assertFalse(self._cutover_holds(turns, job_id))
+
+                fault = store_backup.JobsLockError('ENOLCK')
+                with mock.patch.object(store_backup, 'jobs_lock', side_effect=fault):
+                    with self.assertRaises(store_backup.JobsLockError) as caught:
+                        action()
+                self.assertIs(caught.exception, fault)
+                self.assertEqual(self._migration_journal_rows(root, job_id), before)
+                self.assertFalse(self._cutover_holds(turns, job_id))
+
+                restore_job, _ = self._open_restore_journal(root)
+                self.assertEqual(store_backup.open_restores(root), (restore_job,))
+                turns.run(store_steps.Declared('written', {}), lambda conns:
+                          conns['catalogue'].execute('UPDATE catalogue_identity SET store_id=?',
+                                                     (PRIOR_STORE,)).close())
+                with real_lock(root), mock.patch.object(
+                        store_backup, 'jobs_lock', side_effect=lambda path: real_lock(path, wait_s=0)):
+                    with self.assertRaises(migrate.JobOrphaned):
+                        action()
+                self.assertEqual(self._migration_journal_rows(root, job_id), before)
+                self.assertFalse(self._cutover_holds(turns, job_id))
+
+    def test_cutover_jobs_lock_is_only_held_in_written_backup_turn(self):
+        real_lock = store_backup.jobs_lock
+        for case in ('retry', 'fault-probe'):
+            with self.subTest(case=case):
+                migrate, root, turns, _, job_id = self._cutover_fixture('jobs-lock-' + case)
+                if case == 'fault-probe':
+                    turns.run(store_steps.Declared('written', {}), lambda c:
+                              store_layout.reserve_project(c['catalogue'], PROJECT, 'other', NOW_MS))
+                    store_layout.open_ledger(root, PROJECT, create=True).close()
+
+                observed = []
+                in_backup = False
+                original_backup, original_run = store_backup.backup, turns.run
+                original_take = store_backup.take
+                retry = False
+
+                def busy():
+                    try:
+                        with real_lock(root, wait_s=0):
+                            return False
+                    except store_backup.JobsBusy:
+                        return True
+
+                def watch_backup(*args, **kwargs):
+                    nonlocal in_backup
+                    in_backup = True
+                    try:
+                        return original_backup(*args, **kwargs)
+                    finally:
+                        observed.append(('backup-return', busy()))
+                        in_backup = False
+
+                def watch_turn(declared, body, **kwargs):
+                    if not in_backup:
+                        return original_run(declared, body, **kwargs)
+                    before = busy()
+                    try:
+                        return original_run(declared, body, **kwargs)
+                    finally:
+                        observed.append((declared.catalogue, before, busy()))
+
+                def take(*args, **kwargs):
+                    nonlocal retry
+                    if case == 'retry' and not retry:
+                        retry = True
+                        raise store_backup.BackupRefused('present-set-changed', None)
+                    return original_take(*args, **kwargs)
+
+                with (mock.patch.object(turns, 'run', watch_turn),
+                      mock.patch.object(store_backup, 'backup', watch_backup),
+                      mock.patch.object(store_backup, 'take', take)):
+                    if case == 'retry':
+                        migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                        tail = [('read', False, False), ('written', True, True)]
+                        self.assertEqual(self.checkpoint(root, job_id)[0], 'cutover')
+                    else:
+                        with self.assertRaises(store_backup.BackupRefused) as caught:
+                            migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                        self.assertEqual((caught.exception.reason, caught.exception.detail),
+                                         ('creation-pending', PROJECT))
+                        tail = [(None, False, False)]
+                self.assertEqual(observed, [
+                    ('read', False, False), ('written', True, True), *tail,
+                    ('backup-return', False),
+                ], 'cutover backup lock must cover only the written turn')
+
+    def test_cutover_discovery_allows_restore_claim(self):
+        migrate, root, turns, _, job_id = self._cutover_fixture('restore-during-discovery')
+        backup = store_backup.backup(turns, root, 'daily', NOW_MS)
+        original_present = store_backup.present_ledgers
+        real_lock = store_backup.jobs_lock
+        attempted = []
+
+        def start_restore_during_discovery(conn, observed_root):
+            if not attempted:
+                attempted.append(True)
+                # Stop after the real claim's restore-start checkpoint, before
+                # staging can change anything under this catalogue read.
+                with mock.patch.object(store_backup, '_restore_stage', side_effect=InterruptedCopy):
+                    try:
+                        with self.assertRaises(InterruptedCopy):
+                            store_backup.restore(root, backup.path, PRIOR_JOB, serving_stopped=True,
+                                                 confirm=False, now_ms=NOW_MS + 1)
+                    except store_backup.RestoreRefused as error:
+                        self.fail(f'restore claim during cutover discovery refused: {error.reason}')
+            return original_present(conn, observed_root)
+
+        before = self._migration_journal_rows(root, job_id)
+        with (mock.patch.object(store_backup, 'present_ledgers', start_restore_during_discovery),
+              mock.patch.object(store_backup, 'jobs_lock',
+                                side_effect=lambda path: real_lock(path, wait_s=0))):
+            self._assert_open_restore(migrate, PRIOR_JOB,
+                                      lambda: migrate.cutover(root, turns, job_id, NOW_MS + 2))
+        self.assertEqual(attempted, [True])
+        self.assertEqual(store_backup.open_restores(root), (PRIOR_JOB,))
+        self.assertEqual(self._migration_journal_rows(root, job_id), before)
+        self.assertFalse(self._cutover_holds(turns, job_id))
 
     def test_cutover_requires_store_and_hold(self):
         for change in ('store', 'hold'):

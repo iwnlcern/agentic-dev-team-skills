@@ -10,6 +10,7 @@ A refused submit writes exactly one ``refusals`` row and nothing else; an
 engine fault writes nothing.  No rule reads the body.
 """
 
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 import hashlib
@@ -642,7 +643,72 @@ def _replay(conn, ctx, data, *, before_lock: bool):
     return Admitted(row[0], row[1], row[2])
 
 
-def _admit(conn, ctx, data, now, *, _system=False):
+@dataclass(frozen=True)
+class TurnRefusal:
+    error: errors.EngineError
+    answer: str | None
+
+
+class RouteChanged(Exception):
+    """A classified project no longer has the same active route."""
+
+
+@dataclass(frozen=True)
+class ProjectChecks:
+    project_id: str
+    seats: tuple[tuple[str, str, str, SeatRef | header.AddressRefused], ...]
+    replies: Mapping[str, None]
+    stopped: bool = False
+
+
+def check_project(conn_x: GuardedConnection, project_id: str, reader_project_id: str,
+                  seat_id: str, addresses: Sequence[tuple[str, str, str]],
+                  spellings: Sequence[str], *, release) -> ProjectChecks:
+    """Prove seats in header order; foreign reply targets are unknown in Task 4."""
+    directory = TableDirectory(conn_x, project_id)
+    # Every address here is qualified; only the receiver's project is looked up.
+    sender = SeatRef(seat_id, "", "", None, reader_project_id)
+    seats = []
+    for address, field, role in addresses:
+        try:
+            proof = directory.resolve(address, sender)
+        except header.AddressRefused as refused:
+            proof = refused
+        seats.append((address, field, role, proof))
+    return ProjectChecks(project_id, tuple(seats), dict.fromkeys(spellings))
+
+
+def admit_in_turn(sender: GuardedConnection, ctx, data,
+                  checks: Mapping[str, ProjectChecks]) -> Admitted | TurnRefusal:
+    """Admit or record one refusal. The transfer writer alone commits the turn."""
+    from relay_engine import store_layout
+
+    now = ctx.now_ms()
+    ctx = replace(ctx, directory=TransferDirectory(sender, ctx.sender.project_id, checks))
+    sender.execute("SAVEPOINT engine_transfer_admission").close()
+    try:
+        for project in store_layout.declared_order(False, checks):
+            for address, field, _, proof in checks[project].seats:
+                if isinstance(proof, header.AddressRefused):
+                    draft = header.parse(data)
+                    lines = _Lines(data, draft.header_bytes)
+                    raise errors.error_for("E-ADDRESS", line=lines.of(field), field=field,
+                                           value=header._display(address), reason=proof.reason)
+        admitted = _admit(sender, ctx, data, now, _turn=True)
+    except errors.EngineError as error:
+        sender.execute("ROLLBACK TO engine_transfer_admission").close()
+        sender.execute("RELEASE engine_transfer_admission").close()
+        answer = None
+        if ctx.after_rollback is not None and getattr(error, "_admission_hook_failed", False):
+            answer = _run_after_rollback(sender, ctx)
+        _refusal_row(sender, ctx, data, now, error)
+        _reservation_detail(error, answer, ctx)
+        return TurnRefusal(error, answer)
+    sender.execute("RELEASE engine_transfer_admission").close()
+    return admitted
+
+
+def _admit(conn, ctx, data, now, *, _system=False, _turn=False):
     # With a sender check, submit has already run the checked replay lookup (D6 step 1).
     checked = not _system and ctx.sender_check is not None
     replay = None if _system or checked else _replay(conn, ctx, data, before_lock=not _system)
@@ -658,13 +724,18 @@ def _admit(conn, ctx, data, now, *, _system=False):
     sender = ctx.sender
     # Before the write lock: a slow checkout or a large file digest holds no
     # lock (PR-3 fold S2); relays and recipients rows are append-only.
-    recipients = _recipients(ctx, draft, lines)
-    parent = _parent(conn, sender, draft, lines, before_lock=not _system)
-    answers = _answers(conn, sender, draft, lines, parent, before_lock=not _system)
+    resolved = (_recipients(ctx, draft, lines, with_seats=True) if _turn
+                else _recipients(ctx, draft, lines))
+    recipients = [(seat.seat_id, role) for seat, role in resolved] if _turn else resolved
+    local_recipients = ([(seat.seat_id, role) for seat, role in resolved
+                         if seat.project_id == sender.project_id] if _turn else recipients)
+    reply_checks = {"foreign": ctx.directory.replies} if _turn else {}
+    parent = _parent(conn, sender, draft, lines, before_lock=not _system, **reply_checks)
+    answers = _answers(conn, sender, draft, lines, parent, before_lock=not _system, **reply_checks)
     targets = _references(conn, ctx, draft, lines, before_lock=not _system)
     transitions = _transitions(draft, lines)
     snapshot_plan = _snapshot_plan(draft, lines, targets)
-    if not _system:
+    if not _system and not _turn:
         with _busy_answer():
             conn.execute("BEGIN IMMEDIATE")
     try:
@@ -674,10 +745,11 @@ def _admit(conn, ctx, data, now, *, _system=False):
         # committed this party/key while we were resolving that input.
         replay = None if _system else _replay(conn, ctx, data, before_lock=False)
         if replay is not None:
-            conn.execute("ROLLBACK")
+            if not _turn:
+                conn.execute("ROLLBACK")
             return replay
         if opens_import_bundle:
-            parent = _parent(conn, sender, draft, lines, before_lock=False)
+            parent = _parent(conn, sender, draft, lines, before_lock=False, **reply_checks)
             _require_unbundled_import(conn, parent, draft, lines)
         repository_id = None if _system else _repository(conn, sender, draft, lines)
         _check_findings(conn, sender, transitions)
@@ -709,7 +781,7 @@ def _admit(conn, ctx, data, now, *, _system=False):
                      (relay_id, draft.body))
         conn.executemany(
             "INSERT INTO recipients (relay_id, seat_id, special, role) VALUES (?, ?, ?, ?)",
-            [(relay_id, *party_columns(seat_id), role) for seat_id, role in recipients])
+            [(relay_id, *party_columns(seat_id), role) for seat_id, role in local_recipients])
         if parent is not None:
             conn.execute(
                 "INSERT INTO edges (id, from_relay_id, ordinal, kind, target_type, spelling,"
@@ -733,9 +805,12 @@ def _admit(conn, ctx, data, now, *, _system=False):
                          " ON CONFLICT (seat_id) DO UPDATE SET last_request_at ="
                          " max(last_request_at, excluded.last_request_at)",
                          (sender.seat_id, created))
+        if _turn:
+            _admit_transfers(conn, ctx.directory.checks, sender, resolved, relay_id, draft, created)
         if not _system:
             admitted = Admitted(relay_id, handle, created)
             _run_hook(conn, ctx, admitted, draft)
+        if not _system and not _turn:
             try:
                 conn.execute("COMMIT")
             except sqlite3.Error as error:
@@ -749,7 +824,7 @@ def _admit(conn, ctx, data, now, *, _system=False):
                     raise errors.error_for("E-STORE-BUSY") from None
                 raise
     except BaseException:
-        if not _system:
+        if not _system and not _turn:
             try:
                 active = conn.in_transaction
             except sqlite3.ProgrammingError:
@@ -758,6 +833,23 @@ def _admit(conn, ctx, data, now, *, _system=False):
                 conn.execute("ROLLBACK")
         raise
     return Admitted(relay_id, handle, created)
+
+
+def _admit_transfers(conn, checks, sender, resolved, relay_id, draft, created):
+    # xproject depends on submit for its permission-management entry points.
+    from relay_engine import held_relays, store_layout, xproject
+
+    grouped = {}
+    for seat, role in resolved:
+        if seat.project_id != sender.project_id:
+            grouped.setdefault(seat.project_id, []).append(
+                held_relays.Recipient(seat.seat_id, seat.address, role))
+    digest = hashlib.sha256(draft.body).hexdigest()
+    for project in store_layout.declared_order(False, grouped):
+        decision = xproject.decide(conn, relay_id, project, digest)
+        facts = held_relays.ReceiverFacts(route="active", stopped=checks[project].stopped,
+                                         seats="present")
+        held_relays.admit(conn, relay_id, project, digest, grouped[project], decision, facts, created)
 
 
 _DIGEST_TARGET = {"relay": ("target_relay_id",), "path": ("target_path",),
@@ -803,7 +895,7 @@ def _repository(conn, sender, draft, lines):
     return row[0]
 
 
-def _recipients(ctx, draft, lines):
+def _recipients(ctx, draft, lines, *, with_seats=False):
     result, seats = [], set()
     for field, role, named in (("TO", "to", draft.to), ("CC", "cc", draft.cc)):
         for address in named:
@@ -813,13 +905,14 @@ def _recipients(ctx, draft, lines):
                 raise errors.error_for(
                     "E-ADDRESS", line=lines.of(field), field=field,
                     value=header._display(address), reason=refused.reason) from None
-            if seat.seat_id in seats:
+            key = (seat.project_id, seat.seat_id) if with_seats else seat.seat_id
+            if key in seats:
                 raise errors.error_for(
                     "E-ADDRESS", line=lines.of(field), field=field,
                     value=header._display(address),
                     reason="names the same seat as an earlier address")
-            seats.add(seat.seat_id)
-            result.append((seat.seat_id, role))
+            seats.add(key)
+            result.append((seat if with_seats else seat.seat_id, role))
     return result
 
 
@@ -835,7 +928,9 @@ def _find_relay(conn, project_id, spelling, *, before_lock: bool):
     return row
 
 
-def _local_reply_target(conn, sender, spelling, code, params, *, before_lock: bool):
+def _local_reply_target(conn, sender, spelling, code, params, *, before_lock: bool, foreign=()):
+    if spelling in foreign:
+        raise errors.error_for(code, variant="foreign", **params)
     target, qualified, project = spelling.partition("@")
     if qualified:
         with _busy_answer() if before_lock else nullcontext():
@@ -846,13 +941,14 @@ def _local_reply_target(conn, sender, spelling, code, params, *, before_lock: bo
     return _find_relay(conn, sender.project_id, target, before_lock=before_lock)
 
 
-def _answers(conn, sender, draft, lines, parent, *, before_lock: bool) -> tuple[str, ...]:
+def _answers(conn, sender, draft, lines, parent, *, before_lock: bool,
+             foreign=()) -> tuple[str, ...]:
     """Resolve addressed, opened and distinct answers before taking the write lock."""
     resolved = []
     for index, spelling in enumerate(draft.answers):
         params = {"line": lines.of("ANSWERS", index), "value": header._display(spelling)}
         row = _local_reply_target(conn, sender, spelling, "E-ANSWERS-UNKNOWN", params,
-                                  before_lock=before_lock)
+                                  before_lock=before_lock, foreign=foreign)
         if row is None:
             raise errors.error_for("E-ANSWERS-UNKNOWN", **params)
         with _busy_answer() if before_lock else nullcontext():
@@ -869,13 +965,13 @@ def _answers(conn, sender, draft, lines, parent, *, before_lock: bool) -> tuple[
     return tuple(resolved)
 
 
-def _parent(conn, sender, draft, lines, *, before_lock: bool):
+def _parent(conn, sender, draft, lines, *, before_lock: bool, foreign=()):
     if draft.parent is None:
         return None
     line = lines.of("PARENT")
     params = {"line": line, "value": header._display(draft.parent)}
     row = _local_reply_target(conn, sender, draft.parent, "E-PARENT-UNKNOWN", params,
-                              before_lock=before_lock)
+                              before_lock=before_lock, foreign=foreign)
     if row is None:
         raise errors.error_for("E-PARENT-UNKNOWN", **params)
     with _busy_answer() if before_lock else nullcontext():
@@ -1257,6 +1353,21 @@ class TableDirectory:
         return self.conn.execute(
             "SELECT 1 FROM repositories WHERE project_id = ? AND name = ?",
             (self.project_id, repo)).fetchone() is not None
+
+
+class TransferDirectory(TableDirectory):
+    def __init__(self, conn, project_id, checks):
+        super().__init__(conn, project_id)
+        self.checks = checks
+        self.proofs = {address: proof for check in checks.values()
+                       for address, _, _, proof in check.seats}
+        self.replies = {spelling: match for check in checks.values()
+                        for spelling, match in check.replies.items()}
+
+    def resolve(self, address, sender):
+        if address in self.proofs:
+            return self.proofs[address]
+        return super().resolve(address, sender)
 
 
 @contextmanager

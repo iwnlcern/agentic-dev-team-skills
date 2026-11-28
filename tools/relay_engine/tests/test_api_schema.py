@@ -63,7 +63,7 @@ class TestExport(unittest.TestCase):
         old_digest = '9445baeef11240763072427eee4f9f629979f0a3cc03a6951428dc005784044a'
         artifact = self.export()
         self.assertNotEqual(artifact.digest, old_digest)
-        self.assertEqual(len(json.loads(artifact.canonical_bytes)['$defs']['ApiError']['oneOf']), 48)
+        self.assertEqual(len(json.loads(artifact.canonical_bytes)['$defs']['ApiError']['oneOf']), 56)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(load_generator().main(['--check']), 0)
 
@@ -87,7 +87,7 @@ class TestExport(unittest.TestCase):
             'protocol_window_v1', 'schema_payload_v1', 'negotiated_schema_v1'})
         scopes = [(rule.get('type_ref', rule.get('array_ref', rule.get('operation'))), rule['kind']) for rule in rules]
         self.assertEqual(scopes, sorted(set(scopes)))
-        self.assertEqual(len(doc['$defs']['ApiError']['oneOf']), 48)
+        self.assertEqual(len(doc['$defs']['ApiError']['oneOf']), 56)
         for item in doc['$defs'].values():
             if item.get('type') == 'object':
                 self.assertIs(item['additionalProperties'], False)
@@ -122,10 +122,30 @@ class TestExport(unittest.TestCase):
         self.assertEqual(manifest['schema_digest'], artifact.digest)
         self.assertEqual(sorted(name for name in manifest['operations'] if name.startswith('queue.')),
                          sorted(expected))
-        for binding in ('api_3_0.rs', 'api_3_0.ts'):
-            body = (path / binding).read_text()
-            self.assertIn('"queue.dismiss-all"', body)
-            self.assertNotIn('"queue.dismiss_all"', body)
+        operations = set(manifest['operations'])
+        self.assertIn('queue.dismiss-all', operations)
+        self.assertNotIn('queue.dismiss_all', operations)
+        self._assert_typescript_operations((path / 'api_3_0.ts').read_text(), operations)
+        self._assert_rust_operations((path / 'api_3_0.rs').read_text(), operations)
+        self._assert_terminal_purpose(document)
+
+    def _assert_typescript_operations(self, body, operations):
+        names = re.findall(r'\boperation\s*===\s*"([^"]+)"', body)
+        self.assertTrue(names, 'TypeScript operation comparisons are missing')
+        self.assertEqual(set(names), operations)
+
+    def _assert_rust_operations(self, body, operations):
+        tables = [line.split('match operation{', 1)[1]
+                  for line in body.splitlines() if 'match operation{' in line]
+        self.assertEqual(len(tables), 2, 'Rust request and response match tables are required')
+        for table in tables:
+            self.assertEqual(set(re.findall(r'"([^"]+)"\s*=>', table)), operations)
+
+    def _assert_terminal_purpose(self, document):
+        purposes = document['$defs']['TerminalPurpose']['enum']
+        self.assertIn('queue.dismiss_all', purposes)
+        self.assertNotIn('queue.dismiss-all', purposes)
+        self.assertNotIn('queue.dismiss_all', {row['name'] for row in document['x-adt']['operations']})
 
     def test_no_remote_refs_or_runtime_values(self):
         artifact = self.export()
@@ -670,6 +690,21 @@ class TestGeneratedConsumers(unittest.TestCase):
             with self.subTest(language=language):
                 self.run_consumer(language, cases=cases, controls=False)
 
+    def test_generated_terminal_types_round_trip(self):
+        compiled = load_generator().build_registry()
+        cases = []
+        for name, limit in (('TerminalArgsBase64', 10240), ('TerminalSignatureBase64', 1024),
+                            ('TerminalResultBase64', 65536)):
+            for n, valid in ((limit, True), (limit + 1, False)):
+                value = base64.b64encode(b'\0' * n).decode('ascii')
+                self.assertEqual(not isinstance(r.validate_type(compiled, d.TypeRef(name), value),
+                                                r.ValidationFailure), valid)
+                cases.append(({'action': 'validate_base64_length', 'type': name, 'length': str(n)},
+                              {'valid': valid}))
+        for language in ('rs', 'ts'):
+            with self.subTest(language=language):
+                self.run_consumer(language, cases=cases, controls=False)
+
     def test_schema_export_carries_max_decoded(self):
         from relay_engine import api_schema
         from relay_engine.tests.test_api_registry import TestSliceBRules
@@ -855,6 +890,7 @@ class TestGeneratedConsumers(unittest.TestCase):
         self.assertEqual(manifest['schema_byte_count'], str(artifact.byte_count))
         self.assertEqual(manifest['protocol'], '3.0')
         self.assertEqual(manifest['operations'], [
+            'operator.terminal-act', 'operator.terminal-challenge',
             'project.settings.get', 'project.settings.set', 'protocol.connect', 'protocol.schema', 'queue.answer', 'queue.dismiss',
             'queue.dismiss-all', 'queue.get', 'queue.list', 'queue.open', 'queue.raise',
             'queue.withdraw', 'relay.inbox', 'relay.read', 'relay.submit', 'seat.identify', 'session.end',

@@ -145,6 +145,7 @@ LOCKED_ENGINE_SET = (
     "relay_engine/api_service.py",
     "relay_engine/api_sessions.py",
     "relay_engine/api_submit.py",
+    "relay_engine/api_terminal.py",
     "relay_engine/api_wire.py",
     "relay_engine/api_writer.py",
     "relay_engine/approval_seal.py",

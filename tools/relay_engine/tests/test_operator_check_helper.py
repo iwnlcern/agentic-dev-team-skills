@@ -13,7 +13,7 @@ PATH = TOOLS / 'adt-operator-check'
 HELPER = runpy.run_path(str(PATH))
 PURPOSES = (
     'engine_stop', 'engine_start', 'project_stop', 'project_start',
-    'restore', 'mirror_recovery', 'adopt_restored', 'abandonment',
+    'restore', 'adopt_restored', 'abandonment',
     'new_folder_pass', 'answer_5d', 'report_confirmation',
     'authority.set_reapproval', 'authority.release_restore',
     'authority.assign_reviewer', 'authority.unbind_branch',
@@ -36,6 +36,8 @@ class OperatorCheckHelperTests(unittest.TestCase):
         for index, bad_field in enumerate((b'other', b'unlisted', b'A' * 64, b'\x7f', b'f')):
             with self.subTest(index=index), self.assertRaises(ValueError):
                 HELPER['parse_message'](b'\0'.join(FIELDS[:index] + (bad_field,) + FIELDS[index + 1:]))
+        with self.subTest(purpose='mirror_recovery'), self.assertRaises(ValueError):
+            HELPER['parse_message'](b'\0'.join(FIELDS[:1] + (b'mirror_recovery',) + FIELDS[2:]))
         with self.assertRaises(ValueError):
             HELPER['parse_message'](b'\0'.join(FIELDS + (b'extra',)))
 

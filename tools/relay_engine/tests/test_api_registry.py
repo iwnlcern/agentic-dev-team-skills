@@ -293,57 +293,67 @@ class TestErrorCatalog(unittest.TestCase):
         catalog = errors.api_error_catalog()
         pairs = {(v.code, v.api_class, b.cause_kind, b.remedy)
                  for v in catalog.variants for b in v.branches}
-        self.assertEqual(len(catalog.variants), 11)
-        self.assertEqual(pairs, {
-            ('E_API_NOT_FOUND', 'lookup', 'relay_unknown', 'check_relay_id'),
-            ('E_API_NOT_FOUND', 'lookup', 'project_unknown', 'check_seat_address'),
-            ('E_API_NOT_FOUND', 'lookup', 'seat_unknown', 'check_seat_address'),
-            ('E_API_AUTH', 'auth', 'key_rejected', 'check_key_file'),
-            ('E_API_AUTH', 'auth', 'key_replaced', 'obtain_current_key'),
-            ('E_API_AUTH', 'auth', 'seat_stood_down', 'ask_top_seat'),
-            ('E_API_AUTH', 'auth', 'session_not_current', 'sign_in_again'),
-            ('E_API_AUTH', 'auth', 'not_signed_in', 'sign_in_first'),
-            ('E_API_AUTH', 'auth', 'already_bound', 'open_new_connection'),
-            ('E_API_CONFLICT', 'conflict', 'operation_key_reused', 'use_new_operation_key'),
-            ('E_API_ADMISSION', 'admission', 'client', 'correct_draft'),
-            ('E_API_ADMISSION', 'admission', 'policy', 'change_request'),
-            ('E_API_ADMISSION', 'admission', 'registration', 'check_registration'),
-            ('E_API_ADMISSION', 'admission', 'command', 'check_command'),
-            ('E_API_ADMISSION', 'admission', 'wire', 'correct_draft'),
-            ('E_API_ADMISSION', 'admission', 'integrity', 'report_nonsecret_failure'),
-            ('E_API_CONFLICT', 'conflict', 'submission_key_reused', 'use_new_submission_key'),
-            ('E_API_CONFLICT', 'conflict', 'settings_revision_stale', 'reload_settings'),
-            ('E_API_UNAVAILABLE', 'unavailable', 'authority_unavailable', 'retry_same_submission'),
-            ('E_API_UNAVAILABLE', 'unavailable', 'admission_not_stored', 'retry_same_submission'),
-            ('E_API_UNAVAILABLE', 'unavailable', 'admission_unknown', 'retry_same_submission'),
-            ('E_API_PROTOCOL', 'wire', 'malformed_frame', 'resend_valid_request'),
-            ('E_API_PROTOCOL', 'wire', 'malformed_json', 'resend_valid_request'),
-            ('E_API_PROTOCOL', 'wire', 'invalid_envelope', 'resend_valid_request'),
-            ('E_API_PROTOCOL', 'wire', 'invalid_args', 'resend_valid_request'),
-            ('E_API_PROTOCOL', 'wire', 'unknown_operation', 'refresh_schema'),
-            ('E_API_STATE', 'wire', 'handshake_required', 'reconnect_explicitly'),
-            ('E_API_STATE', 'wire', 'already_connected', 'reconnect_explicitly'),
-            ('E_API_STATE', 'wire', 'non_increasing_request_id', 'reconnect_explicitly'),
-            ('E_API_INCOMPATIBLE', 'version', 'protocol_window', 'update_client'),
-            ('E_API_INCOMPATIBLE', 'version', 'pin_mismatch', 'select_matching_candidate'),
-            ('E_API_UNAVAILABLE', 'unavailable', 'runtime_not_ready', 'restore_expected_runtime'),
-            ('E_API_UNAVAILABLE', 'unavailable', 'schema_unavailable', 'restore_expected_runtime'),
-            ('E_API_INTERNAL', 'internal', 'handler_fault', 'report_nonsecret_failure'),
-            ('E_API_AUTH', 'auth', 'not_operator', 'use_operator_surface'),
-            ('E_API_AUTH', 'auth', 'not_asking_seat', 'withdraw_own_item'),
-            ('E_QUEUE_STATE', 'conflict', 'revision_mismatch', 'refresh_item'),
-            ('E_QUEUE_STATE', 'conflict', 'item_not_pending', 'refresh_item'),
-            ('E_QUEUE_STATE', 'conflict', 'answer_unroutable', 'refresh_item'),
-            ('E_QUEUE_STATE', 'conflict', 'item_not_found', 'refresh_list'),
-            ('E_QUEUE_STATE', 'conflict', 'project_not_active', 'check_subject'),
-            ('E_QUEUE_INVALID', 'wire', 'kind_not_raisable', 'use_permitted_kind'),
-            ('E_QUEUE_INVALID', 'wire', 'surface_not_allowed', 'answer_on_permitted_surface'),
-            ('E_QUEUE_INVALID', 'wire', 'choice_not_allowed', 'refresh_item'),
-            ('E_QUEUE_INVALID', 'wire', 'subject_unresolved', 'check_subject'),
-            ('E_QUEUE_INVALID', 'wire', 'text_too_long', 'shorten_text'),
-            ('E_QUEUE_INVALID', 'wire', 'not_a_notice', 'refresh_item'),
-            ('E_QUEUE_INVALID', 'wire', 'stale_continuation', 'restart_query'),
-        })
+        with self.subTest(pin='variant count'):
+            self.assertEqual(len(catalog.variants), 15)
+        with self.subTest(pin='exact pairs'):
+            self.assertEqual(pairs, {
+                ('E_TERMINAL_CHALLENGE', 'conflict', 'challenge_unknown', 'request_new_challenge'),
+                ('E_TERMINAL_CHALLENGE', 'conflict', 'challenge_used', 'request_new_challenge'),
+                ('E_TERMINAL_CHALLENGE', 'conflict', 'challenge_expired', 'request_new_challenge'),
+                ('E_TERMINAL_LIMIT', 'unavailable', 'challenge_limit', 'retry_after_challenge_expiry'),
+                ('E_TERMINAL_CHECK', 'auth', 'bad_signature', 'confirm_again'),
+                ('E_TERMINAL_CHECK', 'auth', 'key_unsafe', 'reinstall_operator_check'),
+                ('E_TERMINAL_INVALID', 'wire', 'args_not_canonical', 'send_canonical_args'),
+                ('E_TERMINAL_INVALID', 'wire', 'purpose_unhandled', 'update_kit'),
+                ('E_API_NOT_FOUND', 'lookup', 'relay_unknown', 'check_relay_id'),
+                ('E_API_NOT_FOUND', 'lookup', 'project_unknown', 'check_seat_address'),
+                ('E_API_NOT_FOUND', 'lookup', 'seat_unknown', 'check_seat_address'),
+                ('E_API_AUTH', 'auth', 'key_rejected', 'check_key_file'),
+                ('E_API_AUTH', 'auth', 'key_replaced', 'obtain_current_key'),
+                ('E_API_AUTH', 'auth', 'seat_stood_down', 'ask_top_seat'),
+                ('E_API_AUTH', 'auth', 'session_not_current', 'sign_in_again'),
+                ('E_API_AUTH', 'auth', 'not_signed_in', 'sign_in_first'),
+                ('E_API_AUTH', 'auth', 'already_bound', 'open_new_connection'),
+                ('E_API_CONFLICT', 'conflict', 'operation_key_reused', 'use_new_operation_key'),
+                ('E_API_ADMISSION', 'admission', 'client', 'correct_draft'),
+                ('E_API_ADMISSION', 'admission', 'policy', 'change_request'),
+                ('E_API_ADMISSION', 'admission', 'registration', 'check_registration'),
+                ('E_API_ADMISSION', 'admission', 'command', 'check_command'),
+                ('E_API_ADMISSION', 'admission', 'wire', 'correct_draft'),
+                ('E_API_ADMISSION', 'admission', 'integrity', 'report_nonsecret_failure'),
+                ('E_API_CONFLICT', 'conflict', 'submission_key_reused', 'use_new_submission_key'),
+                ('E_API_CONFLICT', 'conflict', 'settings_revision_stale', 'reload_settings'),
+                ('E_API_UNAVAILABLE', 'unavailable', 'authority_unavailable', 'retry_same_submission'),
+                ('E_API_UNAVAILABLE', 'unavailable', 'admission_not_stored', 'retry_same_submission'),
+                ('E_API_UNAVAILABLE', 'unavailable', 'admission_unknown', 'retry_same_submission'),
+                ('E_API_PROTOCOL', 'wire', 'malformed_frame', 'resend_valid_request'),
+                ('E_API_PROTOCOL', 'wire', 'malformed_json', 'resend_valid_request'),
+                ('E_API_PROTOCOL', 'wire', 'invalid_envelope', 'resend_valid_request'),
+                ('E_API_PROTOCOL', 'wire', 'invalid_args', 'resend_valid_request'),
+                ('E_API_PROTOCOL', 'wire', 'unknown_operation', 'refresh_schema'),
+                ('E_API_STATE', 'wire', 'handshake_required', 'reconnect_explicitly'),
+                ('E_API_STATE', 'wire', 'already_connected', 'reconnect_explicitly'),
+                ('E_API_STATE', 'wire', 'non_increasing_request_id', 'reconnect_explicitly'),
+                ('E_API_INCOMPATIBLE', 'version', 'protocol_window', 'update_client'),
+                ('E_API_INCOMPATIBLE', 'version', 'pin_mismatch', 'select_matching_candidate'),
+                ('E_API_UNAVAILABLE', 'unavailable', 'runtime_not_ready', 'restore_expected_runtime'),
+                ('E_API_UNAVAILABLE', 'unavailable', 'schema_unavailable', 'restore_expected_runtime'),
+                ('E_API_INTERNAL', 'internal', 'handler_fault', 'report_nonsecret_failure'),
+                ('E_API_AUTH', 'auth', 'not_operator', 'use_operator_surface'),
+                ('E_API_AUTH', 'auth', 'not_asking_seat', 'withdraw_own_item'),
+                ('E_QUEUE_STATE', 'conflict', 'revision_mismatch', 'refresh_item'),
+                ('E_QUEUE_STATE', 'conflict', 'item_not_pending', 'refresh_item'),
+                ('E_QUEUE_STATE', 'conflict', 'answer_unroutable', 'refresh_item'),
+                ('E_QUEUE_STATE', 'conflict', 'item_not_found', 'refresh_list'),
+                ('E_QUEUE_STATE', 'conflict', 'project_not_active', 'check_subject'),
+                ('E_QUEUE_INVALID', 'wire', 'kind_not_raisable', 'use_permitted_kind'),
+                ('E_QUEUE_INVALID', 'wire', 'surface_not_allowed', 'answer_on_permitted_surface'),
+                ('E_QUEUE_INVALID', 'wire', 'choice_not_allowed', 'refresh_item'),
+                ('E_QUEUE_INVALID', 'wire', 'subject_unresolved', 'check_subject'),
+                ('E_QUEUE_INVALID', 'wire', 'text_too_long', 'shorten_text'),
+                ('E_QUEUE_INVALID', 'wire', 'not_a_notice', 'refresh_item'),
+                ('E_QUEUE_INVALID', 'wire', 'stale_continuation', 'restart_query'),
+            })
 
     def admission_registry(self):
         from relay_engine import api_protocol as p, api_registry as r, errors
@@ -678,7 +688,7 @@ class TestCompile(unittest.TestCase):
                 with self.assertRaises(self.r.RegistryCompileError) as caught:
                     self.compile(graph)
                 self.assertIn(caught.exception.reason, self.r.COMPILE_REASONS)
-        self.assertEqual(len(self.compile().error_arms()), 48)
+        self.assertEqual(len(self.compile().error_arms()), 56)
 
     def test_compile_refuses_branch_defects(self):
         from dataclasses import replace
@@ -761,7 +771,7 @@ class TestCompile(unittest.TestCase):
 
     def test_error_arms_are_complete_records(self):
         registry = self.compile()
-        self.assertEqual(len(registry.error_arms()), 48)
+        self.assertEqual(len(registry.error_arms()), 56)
         for arm in registry.error_arms():
             leaf = registry.types[arm.cause_type.name].shape
             kind = registry.types[leaf.fields[0].type_ref.name].shape.values[0]
