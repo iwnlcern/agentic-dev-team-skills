@@ -504,6 +504,69 @@ class TestProjection(test_schema.Store):
                 self.assertNotIn(other, plan.deletes)
                 self.assertNotIn(other, plan.inserts)
 
+    def test_inbox_seq_rises_strictly(self):
+        for case in ('highest deleted', 'all deleted', 'unique key'):
+            with self.subTest(case=case), closing(sqlite3.connect(':memory:')) as cat:
+                catalogue.init_catalogue(cat)
+
+                def insert(relay_id):
+                    cat.execute(
+                        'INSERT INTO xproject_inbox '
+                        '(source_project_id, relay_id, receiver_project_id, seat_id, role, delivered_at) '
+                        'VALUES (?, ?, ?, ?, ?, ?)',
+                        ('p', relay_id, 'q', 'q-a', 'to', 1),
+                    ).close()
+
+                def sequence(relay_id):
+                    with closing(cat.execute(
+                        'SELECT inbox_seq FROM xproject_inbox WHERE relay_id=?', (relay_id,),
+                    )) as cursor:
+                        return cursor.fetchone()[0]
+
+                for relay_id in ('first', 'second', 'highest'):
+                    insert(relay_id)
+                first, second, highest = map(sequence, ('first', 'second', 'highest'))
+                self.assertGreater(second, first)
+                self.assertGreater(highest, second)
+                if case == 'highest deleted':
+                    cat.execute("DELETE FROM xproject_inbox WHERE relay_id='highest'").close()
+                    insert('next')
+                    self.assertGreater(sequence('next'), highest)
+                elif case == 'all deleted':
+                    cat.execute('DELETE FROM xproject_inbox').close()
+                    insert('next')
+                    self.assertGreater(sequence('next'), highest)
+                else:
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        insert('first')
+
+    def test_inbox_row_fixed(self):
+        cat = sqlite3.connect(':memory:')
+        self.addCleanup(cat.close)
+        catalogue.init_catalogue(cat)
+        columns = ('source_project_id', 'relay_id', 'receiver_project_id', 'seat_id', 'role', 'delivered_at')
+        original = ('p', 'relay', 'q', 'q-a', 'to', 1)
+        cat.execute(
+            'INSERT INTO xproject_inbox (' + ', '.join(columns) + ') VALUES (?, ?, ?, ?, ?, ?)',
+            original,
+        ).close()
+        for column in (*columns, 'inbox_seq'):
+            with self.subTest(column=column):
+                with self.assertRaisesRegex(sqlite3.IntegrityError, 'inbox row is insert-or-delete only'):
+                    cat.execute(f'UPDATE xproject_inbox SET {column}={column}').close()
+                with closing(cat.execute(
+                    'SELECT source_project_id, relay_id, receiver_project_id, seat_id, role, delivered_at, '
+                    'inbox_seq FROM xproject_inbox'
+                )) as cursor:
+                    self.assertEqual(cursor.fetchall(), [(*original, 1)])
+
+    def test_inbox_listing_index(self):
+        cat = sqlite3.connect(':memory:')
+        self.addCleanup(cat.close)
+        catalogue.init_catalogue(cat)
+        with closing(cat.execute("PRAGMA index_info('xproject_inbox_listing')")) as cursor:
+            self.assertEqual([row[2] for row in cursor], ['receiver_project_id', 'seat_id', 'inbox_seq'])
+
     def test_inbox_restore_redelivery(self):
         cat = sqlite3.connect(':memory:')
         self.addCleanup(cat.close)
@@ -512,10 +575,20 @@ class TestProjection(test_schema.Store):
         t2 = ('p', 'relay', 'q', 'q-a', 'to', 2)
         other = ('other', 'relay', 'q', 'q-a', 'to', 1)
         with cat:
-            cat.executemany('INSERT INTO xproject_inbox VALUES (?,?,?,?,?,?)', (t1, other)).close()
+            cat.executemany('INSERT INTO xproject_inbox '
+                            '(source_project_id, relay_id, receiver_project_id, seat_id, role, delivered_at) '
+                            'VALUES (?,?,?,?,?,?)', (t1, other)).close()
+        def sequences():
+            with closing(cat.execute('SELECT source_project_id, inbox_seq FROM xproject_inbox')) as cursor:
+                return dict(cursor.fetchall())
+
         with cat:
             cat.execute('BEGIN IMMEDIATE').close()
-            with closing(cat.execute('SELECT * FROM xproject_inbox ORDER BY source_project_id')) as cursor:
+            before_seq = sequences()
+            with closing(cat.execute(
+                'SELECT source_project_id, relay_id, receiver_project_id, seat_id, role, delivered_at '
+                'FROM xproject_inbox ORDER BY source_project_id'
+            )) as cursor:
                 before = cursor.fetchall()
             plan = held_relays.plan_inbox(
                 'p', (held_relays.DeliveredRecipient(*t2[1:]),),
@@ -525,16 +598,24 @@ class TestProjection(test_schema.Store):
             self.assertEqual(plan.inserts, (held_relays.InboxRow(*t2),))
             held_relays.apply_inbox(cat, 'p', plan)
             self.assertTrue(cat.in_transaction)
-        with closing(cat.execute('SELECT * FROM xproject_inbox ORDER BY source_project_id')) as cursor:
+        with closing(cat.execute(
+            'SELECT source_project_id, relay_id, receiver_project_id, seat_id, role, delivered_at '
+            'FROM xproject_inbox ORDER BY source_project_id'
+        )) as cursor:
             after = cursor.fetchall()
         self.assertEqual(after, [other, t2])
         self.assertEqual(len(after), len(before))
+        after_seq = sequences()
+        self.assertGreater(after_seq['p'], before_seq['p'])
+        self.assertEqual(after_seq['other'], before_seq['other'])
 
     def test_apply_rows(self):
         cat = sqlite3.connect(':memory:')
         self.addCleanup(cat.close)
         catalogue.init_catalogue(cat)
-        cat.executemany('INSERT INTO xproject_inbox VALUES (?,?,?,?,?,?)', (
+        cat.executemany('INSERT INTO xproject_inbox '
+                            '(source_project_id, relay_id, receiver_project_id, seat_id, role, delivered_at) '
+                            'VALUES (?,?,?,?,?,?)', (
             ('p', 'old', 'q', 'a', 'to', 1), ('elsewhere', 'old', 'q', 'a', 'to', 2),
         )).close()
         cat.commit()

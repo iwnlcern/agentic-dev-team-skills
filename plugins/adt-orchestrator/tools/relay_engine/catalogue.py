@@ -235,14 +235,18 @@ ON queue_highwaters (COALESCE(project_id, ''), source)""",
     UNIQUE (source, row_ref)
 ) STRICT""",
     """CREATE TABLE xproject_inbox (
+    inbox_seq INTEGER PRIMARY KEY AUTOINCREMENT,
     source_project_id TEXT NOT NULL,
     relay_id TEXT NOT NULL,
     receiver_project_id TEXT NOT NULL,
     seat_id TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('to', 'cc')),
     delivered_at INTEGER NOT NULL,
-    PRIMARY KEY (source_project_id, relay_id, receiver_project_id, seat_id)
+    UNIQUE (source_project_id, relay_id, receiver_project_id, seat_id)
 ) STRICT""",
+    """CREATE INDEX xproject_inbox_listing ON xproject_inbox (receiver_project_id, seat_id, inbox_seq)""",
+    """CREATE TRIGGER xproject_inbox_fixed BEFORE UPDATE ON xproject_inbox
+BEGIN SELECT RAISE(ABORT, 'inbox row is insert-or-delete only'); END""",
     """CREATE TABLE xproject_asks (
     source_project_id TEXT NOT NULL,
     relay_id TEXT NOT NULL,
