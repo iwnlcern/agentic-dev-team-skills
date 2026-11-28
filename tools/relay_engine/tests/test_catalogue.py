@@ -213,7 +213,73 @@ class TestCatalogue(unittest.TestCase):
         conn = self.opened()
         definitions = conn.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").fetchall()
         digest = hashlib.sha256('\n'.join(sql for (sql,) in definitions).encode()).hexdigest()
-        self.assertEqual(digest, '84c2e2fbc190bc72d80cf2236a5e4a4e42a1b2bd10db8de43d1ba8081bf205d9')
+        self.assertEqual(digest, 'f6f5574a0a3ad8d52083fb5c0f76af7f702c4d5cdd024424bed984425715caeb')
+
+    def test_store_operator_items_append_only(self):
+        conn = self.opened()
+
+        def append(kind='restore_command_started', subject='job', project=P, *,
+                   ends=None, fields='{}'):
+            cursor = conn.execute(
+                'INSERT INTO store_operator_items (kind, project_id, subject, ends, at, fields) '
+                'VALUES (?, ?, ?, ?, 17, ?)', (kind, project, subject, ends, fields))
+            try:
+                return cursor.lastrowid
+            finally:
+                cursor.close()
+
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='store_operator_items'"
+        ).fetchone()
+        self.assertEqual(exists, (1,), 'operator-item table missing')
+        raise_id = append()
+        for sql, verb in (('UPDATE store_operator_items SET at = 25', 'updated'),
+                          ('DELETE FROM store_operator_items', 'deleted')):
+            with self.subTest(verb=verb):
+                with self.assertRaisesRegex(sqlite3.IntegrityError,
+                                            f'store_operator_items cannot be {verb}'):
+                    conn.execute(sql).close()
+        append(ends=raise_id)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, 'store_operator_items.ends'):
+            append(ends=raise_id)
+        for kind in ('restore_command_started', 'report_awaiting_confirmation'):
+            with self.subTest(kind=kind):
+                append(kind, 'dedup', None)
+                with self.assertRaisesRegex(sqlite3.IntegrityError, 'store_operator_items_one_raise'):
+                    append(kind, 'dedup', None)
+                append(kind, 'dedup', Q)
+        for kind in ('project_held_new_folder', 'project_held_5d'):
+            with self.subTest(kind=kind):
+                first = append(kind, 'hold')
+                first_end = append(kind, 'hold', ends=first)
+                try:
+                    second = append(kind, 'hold')
+                except sqlite3.IntegrityError as error:
+                    self.fail(f'second occurrence of {kind} refused: {error}')
+                second_end = append(kind, 'hold', ends=second)
+                self.assertNotEqual(first, second)
+                self.assertNotEqual(first_end, second_end)
+        for kind, subject, payload in (('unknown', 'job', '{}'),
+                                       ('restore_command_started', '', '{}'),
+                                       ('restore_command_started', 'bad-json', '{')):
+            with self.subTest(kind=kind, subject=subject):
+                with self.assertRaisesRegex(sqlite3.IntegrityError, 'CHECK'):
+                    append(kind, subject, fields=payload)
+
+    def test_require_matching_after_items(self):
+        current = sqlite3.connect(':memory:')
+        previous = sqlite3.connect(':memory:')
+        self.addCleanup(current.close)
+        self.addCleanup(previous.close)
+        catalogue.init_catalogue(current)
+        catalogue._require_matching(current)
+        # Remove only the Task 0 definitions, leaving M2's landed inbox DDL.
+        before_items = tuple(sql for sql in catalogue._TABLES if 'store_operator_items' not in sql)
+        with mock.patch.object(catalogue, '_TABLES', before_items):
+            catalogue.init_catalogue(previous)
+        with self.assertRaises(errors.EngineError) as caught:
+            catalogue._require_matching(previous)
+        self.assertEqual(caught.exception.code, 'E-SCHEMA-MISMATCH')
 
     def test_constraints_hold(self):
         conn = self.opened()
@@ -311,7 +377,7 @@ class TestQueueCatalogue(unittest.TestCase):
         self.assertTrue(QUEUE_TABLES <= tables)
         self.assertEqual({n for n, owner in catalogue.TABLE_OWNERS.items() if owner == 'console'},
                          QUEUE_TABLES)
-        self.assertEqual(len(catalogue.TABLE_OWNERS), 20)
+        self.assertEqual(len(catalogue.TABLE_OWNERS), 21)
         for name in QUEUE_TABLES:
             self.assertEqual(conn.execute('SELECT strict FROM pragma_table_list WHERE name=?',
                                           (name,)).fetchone(), (1,))

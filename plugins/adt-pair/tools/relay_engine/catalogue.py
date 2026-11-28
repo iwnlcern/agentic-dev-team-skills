@@ -13,6 +13,7 @@ TABLE_OWNERS: dict[str, str] = {
     'schema_version': 'store',
     'engine_stops': 'store',
     'engine_stop_events': 'store',
+    'store_operator_items': 'store',
     'checkout_routes': 'store',
     'xproject_inbox': 'store',
     'xproject_asks': 'store',
@@ -90,6 +91,24 @@ BEGIN SELECT RAISE(ABORT, 'engine_stops cannot be deleted'); END""",
 BEGIN SELECT RAISE(ABORT, 'engine_stop_events cannot be updated'); END""",
     """CREATE TRIGGER engine_stop_events_guard_delete BEFORE DELETE ON engine_stop_events
 BEGIN SELECT RAISE(ABORT, 'engine_stop_events cannot be deleted'); END""",
+    """CREATE TABLE store_operator_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL CHECK (kind IN ('restore_command_started', 'project_held_new_folder', 'project_held_5d', 'report_awaiting_confirmation')),
+    project_id TEXT,
+    subject TEXT NOT NULL CHECK (length(subject) >= 1),
+    ends INTEGER REFERENCES store_operator_items (id),
+    at INTEGER NOT NULL CHECK (at >= 0),
+    fields TEXT NOT NULL CHECK (json_valid(fields))
+) STRICT""",
+    """CREATE TRIGGER store_operator_items_guard_update BEFORE UPDATE ON store_operator_items
+BEGIN SELECT RAISE(ABORT, 'store_operator_items cannot be updated'); END""",
+    """CREATE TRIGGER store_operator_items_guard_delete BEFORE DELETE ON store_operator_items
+BEGIN SELECT RAISE(ABORT, 'store_operator_items cannot be deleted'); END""",
+    """CREATE UNIQUE INDEX store_operator_items_one_end
+ON store_operator_items (ends) WHERE ends IS NOT NULL""",
+    """CREATE UNIQUE INDEX store_operator_items_one_raise
+ON store_operator_items (kind, subject, COALESCE(project_id, ''))
+WHERE ends IS NULL AND kind IN ('restore_command_started', 'report_awaiting_confirmation')""",
     """CREATE TABLE checkout_routes (
     checkout_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES project_routes (project_id),

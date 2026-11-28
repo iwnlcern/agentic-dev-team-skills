@@ -17,16 +17,6 @@ C = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
 
 
-def run_captured(argv):
-    from relay_engine.seal_types import RunResult
-    result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                            check=False, timeout=30)
-    if result.returncode and any(word in result.stderr.lower() for word in
-                                 (b'password', b'permission', b'not permitted', b'full disk access')):
-        raise RuntimeError('STOP: tmutil requested permission; no answer or retry')
-    return RunResult(result.returncode, result.stdout)
-
-
 class SealFilesTests(unittest.TestCase):
     def setUp(self):
         from relay_engine import seal_files, seal_slots
@@ -298,20 +288,21 @@ class SealFilesTests(unittest.TestCase):
         from relay_engine.seal_types import RunResult
         self.directory()
         if sys.platform == 'darwin':
-            cases = [(1, 0, b'', 'add_failed', 1), (0, 1, b'', 'check_failed', 2),
-                     (0, 0, b'[Included] ' + os.fsencode(self.root), 'not_excluded', 2),
-                     (0, 0, b'', 'not_excluded', 2),
-                     (0, 0, b'[Excluded] ' + os.fsencode(self.root), 'excluded', 2)]
-            for add, check, data, expected, count in cases:
-                calls = []
-                def run(argv):
-                    calls.append(argv)
-                    return RunResult(add if len(calls) == 1 else check,
-                                     b'' if len(calls) == 1 else data)
-                self.assertEqual(self.folder.apply_backup_exclusion(run), expected)
-                self.assertEqual(calls, [['tmutil', 'addexclusion', str(self.root)],
-                    ['tmutil', 'isexcluded', str(self.root)]][:count])
-            self.assertEqual(self.folder.apply_backup_exclusion(run_captured), 'excluded')
+            from relay_engine import seal_wiring
+            with patch.object(seal_wiring, '_spawn_tmutil') as launch:
+                for add, check, data, expected in [
+                    (1, 0, b'[Included] /test', 'add_failed'),
+                    (0, 1, b'', 'check_failed'),
+                    (0, 0, b'[Included] /test', 'not_excluded'),
+                    (0, 0, b'', 'check_failed'),
+                    (0, 0, b'[Excluded] /test', 'excluded'),
+                ]:
+                    with self.subTest(expected=expected):
+                        self.exclusion_case([
+                            RunResult(0, b'[Included] /test'), RunResult(add, b''),
+                            RunResult(check, data),
+                        ], expected)
+                launch.assert_not_called()
         else:
             run = unittest.mock.Mock(side_effect=AssertionError('launched a process'))
             self.assertEqual(self.folder.apply_backup_exclusion(run), 'excluded')
@@ -324,6 +315,74 @@ class SealFilesTests(unittest.TestCase):
             tag.write_bytes(b'other')
             self.assertEqual(self.folder.apply_backup_exclusion(run), 'not_excluded')
             run.assert_not_called()
+
+    def exclusion_case(self, responses, expected):
+        from relay_engine import seal_wiring
+        with patch.object(self.f, '_EXCLUSION_KIND', 'tmutil', create=True):
+            run = unittest.mock.Mock(side_effect=responses)
+            verbs = ['isexcluded', 'addexclusion', 'isexcluded'][:len(responses)]
+            if isinstance(expected, Exception):
+                with self.assertRaises(type(expected)) as caught:
+                    seal_wiring.apply_exclusion(self.root, run)
+                self.assertIs(caught.exception, expected)
+            else:
+                self.assertEqual(seal_wiring.apply_exclusion(self.root, run), expected)
+            self.assertEqual(run.call_args_list, [
+                unittest.mock.call(['tmutil', verb, str(self.root)]) for verb in verbs
+            ])
+
+    def test_exclusion_already_excluded_skips_add(self):
+        from relay_engine.seal_types import RunResult
+        self.exclusion_case([RunResult(0, b'[Excluded] /test')], 'excluded')
+
+    def test_exclusion_add_timeout_decided_by_recheck(self):
+        from relay_engine.seal_types import RunResult
+        self.exclusion_case([
+            RunResult(0, b'[Included] /test'), subprocess.TimeoutExpired('tmutil', 10),
+            RunResult(0, b'[Excluded] /test'),
+        ], 'excluded')
+
+    def test_exclusion_add_failure_then_included(self):
+        from relay_engine.seal_types import RunResult
+        included = RunResult(0, b'[Included] /test')
+        self.exclusion_case([included, RunResult(1, b''), included], 'add_failed')
+
+    def test_exclusion_add_success_then_included(self):
+        from relay_engine.seal_types import RunResult
+        included = RunResult(0, b'[Included] /test')
+        self.exclusion_case([included, RunResult(0, b''), included], 'not_excluded')
+
+    def test_exclusion_recheck_raises(self):
+        from relay_engine.seal_types import RunResult
+        self.exclusion_case([RunResult(0, b'[Included]'), RunResult(0, b''), OSError()], 'check_failed')
+
+    def test_exclusion_recheck_unrecognised(self):
+        from relay_engine.seal_types import RunResult
+        for stdout in (b'', b'error\n[Excluded]'):
+            with self.subTest(stdout=stdout):
+                self.exclusion_case([
+                    RunResult(0, b'[Included]'), RunResult(0, b''), RunResult(0, stdout),
+                ], 'check_failed')
+
+    def test_exclusion_first_check_fails_goes_on(self):
+        from relay_engine.seal_types import RunResult
+        self.exclusion_case([
+            RunResult(1, b'[Excluded]'), RunResult(0, b''), RunResult(0, b'[Excluded]'),
+        ], 'excluded')
+
+    def test_exclusion_first_check_raises_goes_on(self):
+        from relay_engine.seal_types import RunResult
+        self.exclusion_case([OSError(), RunResult(0, b''), RunResult(0, b'[Excluded]')], 'excluded')
+
+    def test_exclusion_stop_crosses_wrapper(self):
+        from relay_engine import seal_wiring
+        from relay_engine.seal_types import RunResult
+        prefix = [RunResult(0, b'[Included]'), RunResult(0, b'')]
+        for kind in (seal_wiring.ExclusionStopped, seal_wiring.ExclusionKilled):
+            for ordinal in range(3):
+                with self.subTest(kind=kind.__name__, ordinal=ordinal):
+                    exception = kind()
+                    self.exclusion_case(prefix[:ordinal] + [exception], exception)
 
     def test_seal_files_launches_nothing(self):
         from relay_engine.tests.test_strings_gate import gate_violations
