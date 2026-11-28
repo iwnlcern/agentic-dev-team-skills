@@ -2339,6 +2339,104 @@ class StoreMigrationCopyTests(unittest.TestCase):
                 self.assertEqual(self._migration_journal_rows(root, job_id), before)
                 self.assertFalse(self._cutover_holds(turns, job_id))
 
+    def test_cutover_jobs_lock_is_only_held_in_written_backup_turn(self):
+        real_lock = store_backup.jobs_lock
+        for case in ('retry', 'fault-probe'):
+            with self.subTest(case=case):
+                migrate, root, turns, _, job_id = self._cutover_fixture('jobs-lock-' + case)
+                if case == 'fault-probe':
+                    turns.run(store_steps.Declared('written', {}), lambda c:
+                              store_layout.reserve_project(c['catalogue'], PROJECT, 'other', NOW_MS))
+                    store_layout.open_ledger(root, PROJECT, create=True).close()
+
+                observed = []
+                in_backup = False
+                original_backup, original_run = store_backup.backup, turns.run
+                original_take = store_backup.take
+                retry = False
+
+                def busy():
+                    try:
+                        with real_lock(root, wait_s=0):
+                            return False
+                    except store_backup.JobsBusy:
+                        return True
+
+                def watch_backup(*args, **kwargs):
+                    nonlocal in_backup
+                    in_backup = True
+                    try:
+                        return original_backup(*args, **kwargs)
+                    finally:
+                        observed.append(('backup-return', busy()))
+                        in_backup = False
+
+                def watch_turn(declared, body, **kwargs):
+                    if not in_backup:
+                        return original_run(declared, body, **kwargs)
+                    before = busy()
+                    try:
+                        return original_run(declared, body, **kwargs)
+                    finally:
+                        observed.append((declared.catalogue, before, busy()))
+
+                def take(*args, **kwargs):
+                    nonlocal retry
+                    if case == 'retry' and not retry:
+                        retry = True
+                        raise store_backup.BackupRefused('present-set-changed', None)
+                    return original_take(*args, **kwargs)
+
+                with (mock.patch.object(turns, 'run', watch_turn),
+                      mock.patch.object(store_backup, 'backup', watch_backup),
+                      mock.patch.object(store_backup, 'take', take)):
+                    if case == 'retry':
+                        migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                        tail = [('read', False, False), ('written', True, True)]
+                        self.assertEqual(self.checkpoint(root, job_id)[0], 'cutover')
+                    else:
+                        with self.assertRaises(store_backup.BackupRefused) as caught:
+                            migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                        self.assertEqual((caught.exception.reason, caught.exception.detail),
+                                         ('creation-pending', PROJECT))
+                        tail = [(None, False, False)]
+                self.assertEqual(observed, [
+                    ('read', False, False), ('written', True, True), *tail,
+                    ('backup-return', False),
+                ], 'cutover backup lock must cover only the written turn')
+
+    def test_cutover_discovery_allows_restore_claim(self):
+        migrate, root, turns, _, job_id = self._cutover_fixture('restore-during-discovery')
+        backup = store_backup.backup(turns, root, 'daily', NOW_MS)
+        original_present = store_backup.present_ledgers
+        real_lock = store_backup.jobs_lock
+        attempted = []
+
+        def start_restore_during_discovery(conn, observed_root):
+            if not attempted:
+                attempted.append(True)
+                # Stop after the real claim's restore-start checkpoint, before
+                # staging can change anything under this catalogue read.
+                with mock.patch.object(store_backup, '_restore_stage', side_effect=InterruptedCopy):
+                    try:
+                        with self.assertRaises(InterruptedCopy):
+                            store_backup.restore(root, backup.path, PRIOR_JOB, serving_stopped=True,
+                                                 confirm=False, now_ms=NOW_MS + 1)
+                    except store_backup.RestoreRefused as error:
+                        self.fail(f'restore claim during cutover discovery refused: {error.reason}')
+            return original_present(conn, observed_root)
+
+        before = self._migration_journal_rows(root, job_id)
+        with (mock.patch.object(store_backup, 'present_ledgers', start_restore_during_discovery),
+              mock.patch.object(store_backup, 'jobs_lock',
+                                side_effect=lambda path: real_lock(path, wait_s=0))):
+            self._assert_open_restore(migrate, PRIOR_JOB,
+                                      lambda: migrate.cutover(root, turns, job_id, NOW_MS + 2))
+        self.assertEqual(attempted, [True])
+        self.assertEqual(store_backup.open_restores(root), (PRIOR_JOB,))
+        self.assertEqual(self._migration_journal_rows(root, job_id), before)
+        self.assertFalse(self._cutover_holds(turns, job_id))
+
     def test_cutover_requires_store_and_hold(self):
         for change in ('store', 'hold'):
             with self.subTest(change=change):

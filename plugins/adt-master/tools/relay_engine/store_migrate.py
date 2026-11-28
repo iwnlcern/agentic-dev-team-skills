@@ -961,6 +961,20 @@ def _cutover_marker(data, job, journal, index, item, expected):
     store_steps.advance_marker(journal, target, preimage)
 
 
+class _CutoverBackupTurns:
+    def __init__(self, turns: store_steps.TurnRunner, root):
+        self._turns = turns
+        self._root = root
+
+    def run(self, declared, body, **kwargs):
+        # Discovery, retry reads and fault probes don't take jobs.lock.
+        if declared.catalogue != 'written':
+            return self._turns.run(declared, body, **kwargs)
+        # Cover the delegated transaction through commit or rollback.
+        with store_backup.jobs_lock(self._root):
+            return self._turns.run(declared, body, **kwargs)
+
+
 def cutover(root, turns: store_steps.TurnRunner, job_id: str, now_ms: int) -> None:
     """Back up, reserve, move, mark, activate and release a validated migration."""
     root = store_layout.resolve_root(root)
@@ -1054,9 +1068,9 @@ def cutover(root, turns: store_steps.TurnRunner, job_id: str, now_ms: int) -> No
                     last = store_backup.last_complete(root, 'before-move')
                     stamp = now_ms if last is None else max(now_ms, last + 1)
                     try:
-                        with store_backup.jobs_lock(root):
-                            store_backup.backup(turns, root, 'before-move', stamp,
-                                               then_hold=(job_id, 'cutover', scopes), before=before_backup)
+                        store_backup.backup(_CutoverBackupTurns(turns, root), root, 'before-move',
+                                            stamp, then_hold=(job_id, 'cutover', scopes),
+                                            before=before_backup)
                     except store_backup.BackupRefused as error:
                         if error.reason == 'creation-pending':
                             holder = turn('read', lambda cat: store_layout.name_holder(cat, name),
