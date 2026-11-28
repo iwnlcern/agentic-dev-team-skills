@@ -583,5 +583,30 @@ class TestQueueRecords(unittest.TestCase):
         self.assertEqual(records.read_cursor(self.conn, None, 'stop_events'), records.Cursor(1, 0, None))
 
 
+class TestStoreItemProjectRules(unittest.TestCase):
+    def test_either_project_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = store_layout.open_catalogue(Path(tmp) / 'store')
+            try:
+                conn.execute("INSERT INTO project_routes (project_id,name,state,created_at) "
+                             "VALUES (?,'p','active',0)", (P,)).close()
+                def raise_notice(subkind, project, key):
+                    request = records.RaiseRequest('notice', subkind, project,
+                                                   {'sentence':'Notice'}, {}, key, key)
+                    return records.raise_item(conn, records.InternalWriter(), request, 100,
+                                              enabled=kinds.ENABLED_TAGS)
+                for subkind in ('restore_command_started', 'report_awaiting_confirmation'):
+                    for project in (P, None):
+                        with self.subTest(subkind=subkind, project=project):
+                            self.assertIsInstance(raise_notice(subkind, project, f'{subkind}:{project}'),
+                                                  records.RaiseResult)
+                for subkind, project in (('engine_stopped', P), ('seat_registered', None)):
+                    self.assertEqual(raise_notice(subkind, project, subkind),
+                                     records.QueueRefusal('E_QUEUE_INVALID', 'subject_unresolved'))
+                self.assertEqual(records._one(conn, 'SELECT COUNT(*) FROM queue_items'), (4,))
+            finally:
+                conn.close()
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -137,8 +137,11 @@ ON checkout_routes (dev, ino) WHERE ended_at IS NULL""",
         'seat_record_missing', 'seat_ambiguous', 'backup_missed',
         'settlement_finished', 'settlement_undone', 'engine_stopped', 'engine_started',
         'project_stopped', 'project_started', 'engine_was_down', 'merge_target_changed',
-        'approval_seal_unusable', 'approval_seal_backup_included'))),
-    project_id TEXT CHECK ((project_id IS NULL) = (
+        'approval_seal_unusable', 'approval_seal_backup_included',
+        'restore_command_started', 'report_awaiting_confirmation'))),
+    project_id TEXT CHECK (
+        subkind IS 'restore_command_started' OR subkind IS 'report_awaiting_confirmation' OR
+        (project_id IS NULL) = (
         subkind IS 'notifier_unhealthy' OR subkind IS 'worker_stalled' OR
         subkind IS 'bridge_refused' OR subkind IS 'panel_key_enrolled' OR
         subkind IS 'engine_updated' OR subkind IS 'engine_update_failed' OR

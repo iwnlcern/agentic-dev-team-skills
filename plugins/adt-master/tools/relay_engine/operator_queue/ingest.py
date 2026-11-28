@@ -326,6 +326,65 @@ def ingest_stop_events(catalogue_conn, now_ms: int) -> int:
     return raised
 
 
+class StoreItemRefused(Exception):
+    def __init__(self, row_id: int, refusal: records.QueueRefusal):
+        self.row_id = row_id
+        self.refusal = refusal
+        super().__init__(f'store item {row_id}: {refusal.cause_kind}')
+
+
+def ingest_store_items(catalogue_conn, now_ms: int, *, limit: int = 100, below: int | None = None) -> int:
+    from relay_engine.operator_queue import notice_text
+
+    conn = catalogue_conn
+    cursor = records.read_cursor(conn, None, 'store_items')
+    select = 'SELECT id,kind,project_id,subject,ends,at,fields FROM store_operator_items WHERE id>?'
+    params = (cursor.position,)
+    if below is not None:
+        select += ' AND id<?'
+        params += (below,)
+    rows = records._rows(conn, select + ' ORDER BY id LIMIT ?', (*params, limit))
+    raised = 0
+    for row_id, kind, project, subject, ends, at, fields_json in rows:
+        if ends is not None:
+            binding = records._one(conn, 'SELECT item_id FROM queue_store_item_sources WHERE raise_row_id=?',
+                                   (ends,))
+            if binding is not None:
+                records.clear_condition(conn, records.InternalWriter(), binding[0], 'notice',
+                                        kind, project, subject, now_ms)
+            continue
+        if project is not None and not records.route_active(conn, project):
+            continue
+        fields = json.loads(fields_json)
+        item = notice_text.StoreItemRow(row_id, kind, project, subject, None, at, fields)
+        outcome = notice_text.store_item_texts(item)
+        if isinstance(outcome, str):
+            record_skip(conn, 'store_items', str(row_id), outcome, now_ms)
+            continue
+        texts, pins = outcome
+        request = records.RaiseRequest('notice', kind, project, texts, pins, subject,
+                                       records._json(['store-item', str(row_id)]))
+        before = records._one(conn, 'SELECT COUNT(*) FROM queue_items')[0]
+        result = records.raise_item(conn, records.InternalWriter(), request, now_ms,
+                                    enabled=kinds.ENABLED_TAGS, fields=notice_text.fit_integers(fields))
+        if isinstance(result, records.QueueRefusal):
+            raise StoreItemRefused(row_id, result)
+        records._write(conn, 'INSERT OR IGNORE INTO queue_store_item_sources (raise_row_id,item_id) VALUES (?,?)',
+                       (row_id, result.item_id))
+        raised += records._one(conn, 'SELECT COUNT(*) FROM queue_items')[0] - before
+    if rows and not records.advance_cursor(conn, None, 'store_items', cursor, rows[-1][0]):
+        raise RuntimeError('store item cursor changed inside its catalogue job')
+    return raised
+
+
+def _retry_store_item_prefix(port: records.JobPort, now_ms: int, refused: StoreItemRefused) -> int:
+    try:
+        result = port.catalogue(lambda conn: ingest_store_items(conn, now_ms, below=refused.row_id))
+    except (StoreItemRefused, records.JobUnavailable):
+        return 0
+    return result if isinstance(result, int) else 0
+
+
 def _read_log_path(log_path: Path) -> tuple[LogLine, ...]:
     try:
         data = log_path.read_bytes()
@@ -361,6 +420,14 @@ def store_ingest_pass(port: records.JobPort, log_path: Path, now_ms: int) -> Sto
             raised += result
     except records.JobUnavailable:
         pass
+    try:
+        result = port.catalogue(lambda conn: ingest_store_items(conn, now_ms))
+        if isinstance(result, int):
+            raised += result
+    except StoreItemRefused as refused:
+        raised += _retry_store_item_prefix(port, now_ms, refused)
+    except records.JobUnavailable:
+        pass
     return StorePassResult(raised, log_unreadable)
 
 
@@ -373,21 +440,26 @@ class StartupIngestIncomplete(Exception):
 
 def store_ingest_startup(port: records.JobPort, log_path: Path, now_ms: int) -> int:
     raised = 0
-    for source in ('lifecycle_log', 'stop_events'):
+    for source in ('lifecycle_log', 'stop_events', 'store_items'):
         try:
             while True:
                 before = port.read_catalogue(lambda conn: records.read_cursor(conn, None, source))
                 if source == 'lifecycle_log':
                     lines = _read_log_path(log_path)
                     result = port.catalogue(lambda conn: ingest_log(conn, lines, before, now_ms))
-                else:
+                elif source == 'stop_events':
                     result = port.catalogue(lambda conn: ingest_stop_events(conn, now_ms))
+                else:
+                    result = port.catalogue(lambda conn: ingest_store_items(conn, now_ms))
                 if isinstance(result, records.Stale):
                     raise StartupIngestIncomplete(source, 'stale')
                 raised += result
                 after = port.read_catalogue(lambda conn: records.read_cursor(conn, None, source))
                 if after == before:
                     break
+        except StoreItemRefused as refused:
+            _retry_store_item_prefix(port, now_ms, refused)
+            raise StartupIngestIncomplete(source, 'refused') from refused
         except records.JobUnavailable:
             raise StartupIngestIncomplete(source, 'job_unavailable') from None
     return raised

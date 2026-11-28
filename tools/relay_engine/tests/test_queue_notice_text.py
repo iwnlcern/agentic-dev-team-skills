@@ -114,16 +114,18 @@ class TestNoticeText(unittest.TestCase):
                                  {'row_id':str(self.counter)},str(self.counter))
         return records.raise_item(self.conn,records.InternalWriter(),req,100,enabled=kinds.ENABLED_TAGS)
 
-    def test_notice_subkinds_twenty_eight(self):
-        self.assertEqual(len(kinds.NOTICE_SUBKINDS),28)
+    def test_notice_subkinds_thirty(self):
+        self.assertEqual(len(kinds.NOTICE_SUBKINDS),30)
         self.assertEqual(len(kinds.NO_PROJECT_SUBKINDS),14)
         sql=self.conn.execute("SELECT sql FROM sqlite_master WHERE name='queue_items'").fetchone()[0]
         import re
         block=sql.split('subkind IN (',1)[1].split(')))',1)[0]
         self.assertEqual(set(re.findall("'([^']+)'",block)),kinds.NOTICE_SUBKINDS)
         block=sql.split('project_id TEXT CHECK',1)[1].split('raiser TEXT',1)[0]
-        self.assertEqual(set(re.findall("subkind IS '([^']+)'",block)),kinds.NO_PROJECT_SUBKINDS)
-        self.assertTrue({'restore_command_started','project_held_5d','project_held_new_folder','report_awaiting_confirmation'}.isdisjoint(kinds.NOTICE_SUBKINDS))
+        self.assertEqual(set(re.findall("subkind IS '([^']+)'",block)),kinds.NO_PROJECT_SUBKINDS | kinds.EITHER_PROJECT_SUBKINDS)
+        self.assertEqual(kinds.EITHER_PROJECT_SUBKINDS,
+                         {'restore_command_started','report_awaiting_confirmation'})
+        self.assertTrue({'project_held_5d','project_held_new_folder'}.isdisjoint(kinds.NOTICE_SUBKINDS))
 
     def test_service_sentences_exact(self):
         self.assertEqual(self.n.SERVICE_SENTENCES,SERVICES)
