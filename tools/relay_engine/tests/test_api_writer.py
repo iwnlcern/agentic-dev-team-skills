@@ -1093,6 +1093,103 @@ class WriterTests(unittest.TestCase):
             return api_writer.JobOutcome(False, conn.execute('SELECT name FROM projects').fetchone()[0])
         self.assertEqual(writer.submit(P, self.job(read)).value, 'after')
 
+    def test_callee_closed_handle_keeps_exception(self):
+        class JobFailure(BaseException):
+            pass
+
+        writer = self.writer()
+        original = JobFailure('callee failed')
+
+        def run(conn):
+            conn.close()
+            raise original
+
+        with self.assertRaises(JobFailure) as caught:
+            writer.submit_callee(P, self.job(run))
+        self.assertIs(caught.exception, original)
+        self.assertEqual(original.__notes__, ['writer handle closed by the job'])
+
+    def test_callee_closed_handle_returned_answers_rollback_failed(self):
+        writer = self.writer()
+
+        def run(conn):
+            conn.close()
+            return api_writer.JobOutcome(True, 'not published')
+
+        error = self.assert_unavailable(
+            lambda: writer.submit_callee(P, self.job(run)), 'rollback_failed')
+        self.assertIsInstance(error.__cause__, sqlite3.ProgrammingError)
+
+    def test_callee_closed_handle_retires_project(self):
+        self.second_project()
+        reasons = {}
+        for mode in ('rollback', 'closed'):
+            with self.subTest(mode=mode):
+                entered, released, queued, ran = (threading.Event() for _ in range(4))
+
+                def hook(phase):
+                    if phase == 'queued' and entered.is_set():
+                        queued.set()
+
+                def fail(conn):
+                    entered.set()
+                    self.assertTrue(released.wait(5))
+                    if mode == 'closed':
+                        conn.close()
+                    else:
+                        conn.execute('BEGIN IMMEDIATE').close()
+                        self.deny_rollback(conn)
+                    raise original
+
+                def next_job(conn):
+                    ran.set()
+                    return api_writer.JobOutcome(True, 'another job')
+
+                writer = self.writer(hook)
+                serve_for_test(writer, Q)
+                original = RuntimeError(mode)
+                with ThreadPoolExecutor(2) as pool:
+                    first = pool.submit(writer.submit_callee, P, self.job(fail))
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        second = pool.submit(writer.submit_callee, P, self.job(next_job))
+                        self.assertTrue(queued.wait(5))
+                    finally:
+                        released.set()
+                    with self.assertRaises(RuntimeError) as caught:
+                        first.result(5)
+                    self.assertIs(caught.exception, original)
+                    behind = self.assert_unavailable(
+                        lambda: second.result(5), 'rollback_failed')
+                fresh = self.assert_unavailable(
+                    lambda: writer.submit_callee(P, self.job(next_job)), 'project_not_served')
+                opened = self.assert_unavailable(lambda: writer.open_project(P), 'rollback_failed')
+                self.assertFalse(ran.is_set())
+                self.assertEqual(writer.submit_callee(Q, self.job(next_job, Q)).value, 'another job')
+                self.assertTrue(ran.is_set())
+                reasons[mode] = (behind.reason, fresh.reason, opened.reason)
+                if mode == 'closed':
+                    self.assertEqual(reasons['closed'], reasons['rollback'])
+
+    def test_rollback_failure_fence_unchanged(self):
+        writer = self.writer()
+        original = RuntimeError('job failed')
+
+        def run(conn):
+            self.deny_rollback(conn)
+            raise original
+
+        with self.assertRaises(RuntimeError) as caught:
+            writer.submit(P, self.job(run))
+        self.assertIs(caught.exception, original)
+        self.assertEqual(original.__notes__, ['writer ROLLBACK failed: DatabaseError SQLITE_AUTH'])
+        failure = writer._rollback_errors[P]
+        self.assertIsInstance(failure, sqlite3.DatabaseError)
+        self.assertEqual(failure.sqlite_errorname, 'SQLITE_AUTH')
+        self.assert_unavailable(lambda: writer.submit(P, self.job(self.success)), 'project_not_served')
+        error = self.assert_unavailable(lambda: writer.open_project(P), 'rollback_failed')
+        self.assertIs(error.__cause__, failure)
+
     def test_callee_left_transaction_is_rolled_back(self):
         writer = self.writer()
         def run(conn):

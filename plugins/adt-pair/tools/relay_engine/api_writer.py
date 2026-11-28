@@ -1846,6 +1846,32 @@ class StoreWriter:
                 raise _unavailable('rollback_failed', error) from error
             raise WriterUnavailable('project_not_served')
 
+    def _retire_failed_handle(self, failure):
+        project = self._active_project
+        with self._lock:
+            conn = self._connections[project]
+            self._conn = None
+            self._rollback_errors[project] = failure
+            slot = self._join_slot.get(project)
+            joining = (slot is not None and slot.binding is not None
+                       and slot.binding.conn is conn)
+            if not joining:
+                self._served.discard(project)
+                self._bindings.pop(project, None)
+                self._connections.pop(project)
+        if joining:
+            self._finalize_join(slot, forced='rollback_failed')
+        else:
+            self._close_ledger(project, conn)
+        try:
+            strings.emit('stderr', 'store-writer-rollback-failed')
+        except Exception:
+            pass
+        try:
+            strings.report_diagnostic(failure)
+        except Exception:
+            pass
+
     def _rollback(self, original=None):
         failure = None
         try:
@@ -1853,30 +1879,7 @@ class StoreWriter:
         except BaseException as error:
             failure = error
         if failure is not None:
-            project = self._active_project
-            with self._lock:
-                conn = self._connections[project]
-                self._conn = None
-                self._rollback_errors[project] = failure
-                slot = self._join_slot.get(project)
-                joining = (slot is not None and slot.binding is not None
-                           and slot.binding.conn is conn)
-                if not joining:
-                    self._served.discard(project)
-                    self._bindings.pop(project, None)
-                    self._connections.pop(project)
-            if joining:
-                self._finalize_join(slot, forced='rollback_failed')
-            else:
-                self._close_ledger(project, conn)
-            try:
-                strings.emit('stderr', 'store-writer-rollback-failed')
-            except Exception:
-                pass
-            try:
-                strings.report_diagnostic(failure)
-            except Exception:
-                pass
+            self._retire_failed_handle(failure)
             if original is not None:
                 original.add_note('writer ROLLBACK failed: ' + type(failure).__name__
                                   + ' ' + str(getattr(failure, 'sqlite_errorname', None)))
@@ -1941,7 +1944,15 @@ class StoreWriter:
             self._phase('returned')
         except BaseException as error:
             original = error
-        if self._conn.in_transaction:
+        try:
+            in_transaction = self._conn.in_transaction
+        except sqlite3.ProgrammingError as closed:
+            self._retire_failed_handle(closed)
+            if original is not None:
+                original.add_note('writer handle closed by the job')
+                return None, original
+            return None, _unavailable('rollback_failed', closed)
+        if in_transaction:
             original = self._rollback(original if original is not None else CalleeLeftTransaction())
         if original is not None:
             return None, original
