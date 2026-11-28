@@ -1409,6 +1409,8 @@ class TestSealWorker(unittest.TestCase):
         self.assertIs(worker.stop(), True)
 
     def test_raising_close_keeps_stop_false(self):
+        from time import monotonic
+
         worker = self.worker()
         original = worker._reader.close
         def broken_close():
@@ -1416,8 +1418,11 @@ class TestSealWorker(unittest.TestCase):
             raise OSError('close outcome unavailable')
         worker._reader.close = broken_close
         self.workers[-1][1].finish()
-        self.assertIs(worker.stop(), False)
-        self.assertFalse(worker._thread.is_alive())
+        owner = worker._thread
+        worker.stop(monotonic() + 5)
+        owner.join(timeout=5)
+        self.assertFalse(owner.is_alive())
+        self.assertIs(worker.stop(monotonic() + 5), False)
 
     def test_worker_rejected_candidate_reader_acknowledged(self):
         entered, release = threading.Event(), threading.Event()

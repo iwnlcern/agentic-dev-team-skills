@@ -831,6 +831,8 @@ class SealRendererTests(unittest.TestCase):
         self.assertIs(renderer.stop(), True)
 
     def test_raising_close_keeps_stop_false(self):
+        from time import monotonic
+
         def reader(*args):
             opened = self.ledger.open_reader(*args)
             close = opened.close
@@ -841,8 +843,11 @@ class SealRendererTests(unittest.TestCase):
             return opened
         renderer = self.renderer(reader=reader)
         self.open(renderer)
-        self.assertIs(renderer.stop(), False)
-        self.assertFalse(renderer._newest(P).thread.is_alive())
+        owner = renderer._newest(P).thread
+        renderer.stop(monotonic() + 5)
+        owner.join(timeout=5)
+        self.assertFalse(owner.is_alive())
+        self.assertIs(renderer.stop(monotonic() + 5), False)
 
     def test_hook_close_completed(self):
         store = self.real_store(); self.rows(1, ledger=store)
