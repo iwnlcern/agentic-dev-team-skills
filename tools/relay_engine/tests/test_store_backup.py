@@ -625,3 +625,451 @@ class TestBackups(unittest.TestCase):
         self.assertEqual(store_backup.prune(self.root, store_backup.BackupSettings(), NOW), [])
         self.assertTrue(staged.is_dir())
         self.assertEqual(self._tree_bytes(staged), saved)
+
+
+class TestRestore(unittest.TestCase):
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.scratch = Path(scratch.name).resolve()
+        self.reset('store')
+
+    def reset(self, label):
+        self.root = self.scratch / label
+        store_layout.open_catalogue(self.root).close()
+        self.turns = store_steps.DirectTurns(self.root)
+
+    class Crash(Exception):
+        pass
+
+    def restore(self, backup, *, confirm=True, job=JOB):
+        return store_backup.restore(self.root, getattr(backup, 'path', backup), job,
+                                    serving_stopped=True, confirm=confirm, now_ms=NOW + 100)
+
+    def reserve(self, project, holder=None):
+        self.turns.run(store_steps.Declared('written', {}), lambda c: store_layout.reserve_project(
+            c['catalogue'], project, project, NOW, held_by_job=holder))
+
+    def make(self, project, *, active=True):
+        from relay_engine import store_create
+
+        self.reserve(project)
+        if active:
+            store_create.finish_creation(self.turns, project)
+        else:
+            with store_layout.open_ledger(self.root, project, create=True) as con:
+                con.execute('INSERT INTO projects(id,name,created_at) VALUES(?,?,?)',
+                            (project, project, NOW)).close()
+            con.close()
+
+    def snapshot(self, root=None):
+        return store_backup.backup(self.turns, root or self.root, 'daily', NOW)
+
+    def seal(self, backup, relative, operation):
+        path = backup.path / relative
+        operation(path)
+        manifest = backup.path / 'manifest.json'
+        data = json.loads(manifest.read_bytes())
+        if relative not in data['files']:
+            data['files'][relative] = dict(data['files']['machine.sqlite3'])
+        data['files'][relative].update(size=path.stat().st_size,
+                                       sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        raw = (json.dumps(data, sort_keys=True, separators=(',', ':')) + '\n').encode()
+        manifest.write_bytes(raw)
+        (backup.path / 'manifest.sha256').write_text(hashlib.sha256(raw).hexdigest() + '\n')
+
+    def ledger(self, project, sql, root=None):
+        from contextlib import closing
+
+        path = store_layout.ledger_path(root or self.root, project)
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as conn:
+            return store_backup._rows(conn, sql)
+
+    def pending(self):
+        from contextlib import closing
+
+        path = store_layout.catalogue_path(self.root)
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True)) as cat:
+            return store_backup.pending_creations(cat)
+
+    def digest(self, project, root=None):
+        path = store_layout.ledger_path(root or self.root, project)
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def fixture_migration(self):
+        from relay_engine.tests import test_store_migrate as fixtures
+
+        fixture = fixtures.StoreMigrationCopyTests()
+        fixture.scratch = self.scratch
+        return fixture, fixtures.NOW_MS
+
+    def seeded(self):
+        from contextlib import closing
+
+        for project in (P, Q):
+            self.make(project)
+            with closing(store_layout.open_ledger(self.root, project)) as conn, conn:
+                conn.execute("INSERT INTO team_instances(id,project_id,name,level,opened_at,opened_by)"
+                             " VALUES('team',?,'pair','pair',?,'operator')", (project, NOW)).close()
+                conn.execute("INSERT INTO seats VALUES('seat','team','implementer','occupied')").close()
+                conn.execute("INSERT INTO repositories VALUES('repo',?,'repo')", (project,)).close()
+                conn.execute("INSERT INTO bundles(id,project_id,name,opened_by_special)"
+                             " VALUES('bundle',?,'bundle','operator')", (project,)).close()
+                for handle in (1, 2):
+                    item = str(handle)
+                    conn.execute(
+                        "INSERT INTO relays(id,handle,project_id,kind,needs,subject,sender_special,"
+                        " created_at,body_sha256,meta_sha256,body_bytes,header_bytes)"
+                        " VALUES(?,?,?,'SITREP','none','fixture','operator',?,?,?,0,0)",
+                        (item, handle, project, NOW + handle, 'a' * 64, 'b' * 64)).close()
+                    conn.execute(
+                        "INSERT INTO slips(id,handle,project_id,kind,seat_id,issuer_special,bundle_id,"
+                        " repository_id,issued_in,binds,state,issued_at,revision)"
+                        " VALUES(?,?,?,'implement','seat','operator','bundle','repo',?,'{}','live',?,1)",
+                        (item, handle, project, item, NOW + handle)).close()
+        return self.snapshot()
+
+    def check_held(self, project, slips=2):
+        self.assertEqual(self.ledger(project, 'SELECT job_id FROM restore_cancels'), [(JOB,)])
+        self.assertEqual(self.ledger(project, "SELECT state,revision FROM slips ORDER BY handle"),
+                         [('revoked', 2)] * slips)
+        self.assertEqual(self.ledger(project, "SELECT event FROM slip_events"), [('revoke',)] * slips)
+
+    def test_restore_verifies_and_renews(self):
+        for change in ('manifest', 'file', 'swap'):
+            with self.subTest(change=change):
+                self.reset(change)
+                self.make(P)
+                backup = self.snapshot()
+                self.assertTrue(callable(store_backup.restore))
+                if change != 'swap':
+                    path = backup.path / ('manifest.json' if change == 'manifest' else 'machine.sqlite3')
+                    with path.open('ab') as fh:
+                        fh.write(b'changed')
+                    with self.assertRaises(store_backup.RestoreRefused) as caught:
+                        self.restore(backup)
+                    self.assertEqual(caught.exception.reason, 'backup-mismatch')
+                    continue
+                real = store_steps._rename
+                def rename(src, dst):
+                    real(src, dst)
+                    if src == store_layout.catalogue_path(self.root):
+                        raise self.Crash()
+                with mock.patch.object(store_steps, '_rename', side_effect=rename):
+                    with self.assertRaises(self.Crash):
+                        self.restore(backup)
+                report = self.restore(backup)
+                self.assertNotEqual(report.new_store_id, backup.store_id)
+                self.assertEqual(store_layout.read_store_id(self.root), report.new_store_id)
+                self.check_held(P, slips=0)
+
+    def test_restore_completes_pending_creation(self):
+        from relay_engine import store_create
+
+        self.reserve(P)
+        report = self.restore(self.snapshot())
+        self.assertEqual(self.pending(), [P])
+        self.assertEqual(report.being_created, (P,))
+        for project in self.pending():
+            store_create.finish_creation(self.turns, project)
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.ledger(P, 'SELECT * FROM restore_cancels'), [])
+
+    def test_before_move_restore_end_state(self):
+        fixture, stamp = self.fixture_migration()
+        for removed in (False, True):
+            with self.subTest(removed=removed):
+                migrate, root, turns, _, job = fixture._cutover_fixture(str(removed), paired=True)
+                self.root = root
+                _, data = fixture.checkpoint(root, job)
+                marker = store_steps.advance_marker
+                completed = []
+                def first(journal, target, preimage):
+                    if completed:
+                        raise self.Crash()
+                    value = marker(journal, target, preimage)
+                    completed.append(target.root_path)
+                    return value
+                with mock.patch.object(store_steps, 'advance_marker', side_effect=first):
+                    with self.assertRaises(self.Crash):
+                        migrate.cutover(root, turns, job, stamp + 1)
+                backup, = (root / 'backups').glob('*-before-move')
+                store_layout.catalogue_path(root).unlink()
+                shutil.rmtree(root / 'projects')
+                if removed:
+                    (root / 'migrations' / job / 'job.sqlite3').unlink()
+                report = self.restore(backup)
+                move, = report.moved_jobs
+                self.assertEqual(move.job_id, job)
+                self.assertEqual(move.state, 'unavailable' if removed else 'journal')
+                self.assertEqual(tuple(map(Path, move.marked_roots)), () if removed else tuple(map(Path, completed)))
+                if removed:
+                    self.assertIn(f'The move state for job {job} is unavailable.', report.lines())
+                    self.assertFalse(any('still marked' in line for line in report.lines()))
+                else:
+                    self.assertTrue(any(job in line and str(completed[0]) in line for line in report.lines()))
+                self.assertEqual(fixture._cutover_route(store_steps.DirectTurns(root), data['project_id']),
+                                 'not-found')
+                if not removed:
+                    with self.assertRaises(migrate.JobOrphaned):
+                        migrate.cutover(root, store_steps.DirectTurns(root), job, stamp + 2)
+                self.assertFalse(fixture._cutover_holds(store_steps.DirectTurns(root), job))
+                self.assertEqual(store_backup.backup(store_steps.DirectTurns(root), root, 'daily',
+                                                     stamp + 3).reason, 'daily')
+
+    def empty_file(self, target, project):
+        from contextlib import closing
+
+        with closing(store_layout.open_ledger(self.root, project, create=True)):
+            pass
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(store_layout.ledger_path(self.root, project), target)
+
+    def test_restore_base_creation_after_steps(self):
+        from relay_engine import store_create
+
+        for phase in ('reserved', 'empty-file', 'project-row'):
+            with self.subTest(phase=phase):
+                self.reset(phase)
+                if phase == 'project-row':
+                    self.make(P, active=False)
+                    rows_before = self.ledger(P, 'SELECT * FROM projects')
+                else:
+                    self.reserve(P)
+                backup = self.snapshot()
+                if phase == 'empty-file':
+                    self.seal(backup, f'projects/{P}/ledger.sqlite3',
+                              lambda target: self.empty_file(target, P))
+                from relay_engine import restore_cancel
+                with mock.patch.object(restore_cancel, 'cancel_all', wraps=restore_cancel.cancel_all) as calls:
+                    report = self.restore(backup)
+                self.assertEqual(self.pending(), [P])
+                self.assertEqual(report.held, (P,) if phase == 'project-row' else ())
+                self.assertEqual(report.being_created, () if phase == 'project-row' else (P,))
+                self.assertEqual(calls.call_count, int(phase == 'project-row'))
+                store_create.finish_creation(self.turns, P)
+                self.assertEqual(self.pending(), [])
+                self.assertEqual(len(self.ledger(P, 'SELECT id FROM projects')), 1)
+                if phase == 'project-row':
+                    self.assertEqual(self.ledger(P, 'SELECT * FROM projects'), rows_before)
+                    self.check_held(P, slips=0)
+                else:
+                    self.assertEqual(self.ledger(P, 'SELECT * FROM restore_cancels'), [])
+
+    def test_restore_undone_reservation(self):
+        from relay_engine import restore_cancel, store_create
+
+        fixture, stamp = self.fixture_migration()
+        migrate, self.root, self.turns, legacy, job, project, _ = fixture._undo_fixture('undo')
+        fixture._undo_call(migrate, self.root, self.turns, job)
+        with mock.patch.object(restore_cancel, 'cancel_all', wraps=restore_cancel.cancel_all) as calls:
+            report = self.restore(self.snapshot())
+        self.assertNotIn(project, report.held + report.being_created)
+        self.assertFalse(any('being created' in line or 'cancels every' in line for line in report.lines()
+                             if line != store_backup.RESTORE_LIMITS[0]))
+        calls.assert_not_called()
+        self.assertNotIn(project, self.pending())
+        with self.assertRaises(store_create.CreationHeld):
+            store_create.finish_creation(self.turns, project)
+        self.assertFalse(store_layout.ledger_path(self.root, project).exists())
+        self.assertEqual(fixture._cutover_route(self.turns, project), 'creating')
+        new_job = migrate.start(self.root, self.turns,
+                                migrate.MigrationManifest('takeover', 'fixture', (legacy,)), stamp + 10)
+        phase, data = fixture.checkpoint(self.root, new_job)
+        self.assertEqual((phase, data['project_id'], data['project_name']), ('manifest', project, 'fixture'))
+
+    def test_restore_report_from_journals(self):
+        self.make(P)
+        self.reserve(Q)
+        report = self.restore(self.snapshot(), confirm=False)
+        lines = report.lines()
+        held = store_backup.HELD_LINE.format(name=P)
+        creating = store_backup.BEING_CREATED_LINE.format(name=Q)
+        self.assertIn(held, lines)
+        self.assertIn(creating, lines)
+        self.assertLess(lines.index(held), lines.index(creating))
+        self.assertEqual(lines[-7:], store_backup.RESTORE_LIMITS)
+        self.assertEqual(lines.count(store_backup.RESTORE_LIMITS[3]), 1)
+        self.assertEqual(lines[0], f'Project {P}: no later relay or receipt was found.')
+        self.assertEqual(store_backup.RESTORE_LIMITS[3],
+                         'During the hold no agent gets a go-ahead, and you end the hold at the terminal.')
+
+    def test_restore_keeps_migrations(self):
+        journal_dir = self.root / 'migrations' / JOB
+        journal = store_steps.open_journal(journal_dir, create=True)
+        journal.checkpoint('fixture', {'source': 'retained'})
+        journal.close()
+        path = journal_dir / 'job.sqlite3'
+        before = path.read_bytes()
+        self.restore(self.snapshot())
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_restore_cancels_each_staged_ledger_before_swap(self):
+        from relay_engine import restore_cancel
+
+        uninterrupted = None
+        for cut in (None, 0, 1, 2):
+            with self.subTest(cut=cut):
+                self.reset(f'order-{cut}')
+                backup = self.seeded()
+                original = {p: self.digest(p) for p in (P, Q)}
+                calls = []
+                cancel = restore_cancel.cancel_all
+                prepare = store_steps.prepare_database
+                def record(conn, project, job, now):
+                    if cut == len(calls) and cut < 2 and not stop[0]:
+                        stop[0] = True
+                        raise self.Crash()
+                    path = Path(conn.execute('PRAGMA database_list').fetchone()[2])
+                    self.assertEqual(path, self.root / 'recovery' / JOB / 'store'
+                                     / 'projects' / project / 'ledger.sqlite3')
+                    self.assertFalse(conn.in_transaction)
+                    self.assertEqual({p: self.digest(p) for p in (P, Q)}, original)
+                    calls.append(project)
+                    return cancel(conn, project, job, now)
+                def preparing(path):
+                    self.assertEqual(calls, [P, Q])
+                    if cut == 2 and not stop[0]:
+                        stop[0] = True
+                        raise self.Crash()
+                    return prepare(path)
+                stop = [False]
+                with mock.patch.object(restore_cancel, 'cancel_all', side_effect=record), mock.patch.object(
+                        store_steps, 'prepare_database', side_effect=preparing):
+                    if cut is not None:
+                        with self.assertRaises(self.Crash):
+                            self.restore(backup)
+                    report = self.restore(backup)
+                self.assertEqual(calls, [P, Q])
+                for project in (P, Q):
+                    self.check_held(project)
+                if uninterrupted is None:
+                    uninterrupted = report.lines()
+                self.assertEqual(report.lines(), uninterrupted)
+
+    def test_restore_cancel_replay_after_commit_before_receipt(self):
+        from relay_engine import restore_cancel
+
+        backup = self.seeded()
+        staged = self.root / 'recovery' / JOB / 'store'
+        cancel, receipt, prepare = restore_cancel.cancel_all, store_steps.Journal.receipt, store_steps.prepare_database
+        calls, readers, before_prepare, preparations = [], [], [], []
+        flags = {'cancel': False, 'prepare': False}
+        def recording(conn, project, job, now):
+            if not calls:
+                path = store_layout.ledger_path(staged, project)
+                # Keep a writable handle open so the final writable close checkpoints
+                # even though the actual cancellation connection closes before its receipt.
+                anchor = store_layout.open_ledger(staged, project)
+                reader = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, isolation_level=None)
+                readers.append((reader, anchor))
+                self.addCleanup(anchor.close)
+                self.addCleanup(reader.close)
+                reader.execute('BEGIN').close()
+                reader.execute('SELECT count(*) FROM slips').fetchone()
+                before_prepare.append(self.digest(project, staged))
+            result = cancel(conn, project, job, now)
+            calls.append((project, result))
+            return result
+        def after_commit(journal, ident, observed):
+            if calls and not flags['cancel']:
+                flags['cancel'] = True
+                raise self.Crash()
+            if (preparations and not flags['prepare'] and isinstance(observed, dict)
+                    and observed.get('sha256') == preparations[-1].sha256):
+                flags['prepare'] = True
+                raise self.Crash()
+            out = receipt(journal, ident, observed)
+            if readers and calls[-1][0] == P:
+                self.assertEqual(before_prepare[0], self.digest(P, staged))
+                reader, anchor = readers.pop()
+                reader.close()
+                anchor.close()
+            return out
+        def preparing(path):
+            result = prepare(path)
+            if Path(path) == store_layout.ledger_path(staged, P):
+                self.assertNotEqual(before_prepare[0], result.sha256)
+                preparations.append(result)
+            return result
+        with mock.patch.object(restore_cancel, 'cancel_all', side_effect=recording), mock.patch.object(
+                store_steps.Journal, 'receipt', after_commit), mock.patch.object(
+                store_steps, 'prepare_database', side_effect=preparing):
+            for _ in range(2):
+                with self.assertRaises(self.Crash):
+                    self.restore(backup)
+            self.restore(backup)
+        self.assertEqual([project for project, _ in calls], [P, P, Q])
+        self.assertTrue(calls[1][1].already)
+        self.assertEqual(calls[1][1].cut_handle, calls[0][1].cut_handle)
+        for project in (P, Q):
+            self.check_held(project)
+        self.assertEqual(len(preparations), 2)
+        self.assertEqual(preparations[0], preparations[1])
+        from contextlib import closing
+        control = self.scratch / 'stale-digest-control'
+        control.mkdir()
+        source, target = control / 'source.sqlite3', control / 'target.sqlite3'
+        shutil.copyfile(store_layout.ledger_path(self.root, P), source)
+        prepared = prepare(source)
+        with closing(store_steps.open_journal(control, create=True)) as journal:
+            with self.assertRaises(store_steps.FenceBreach):
+                store_steps.move_database(journal, store_steps.Prepared(prepared.size, before_prepare[0]),
+                                          source, target)
+        self.assertTrue(source.is_file())
+        self.assertFalse(target.exists())
+
+    def test_restore_empty_authority_project_held(self):
+        self.make(P)
+        report = self.restore(self.snapshot())
+        self.check_held(P, slips=0)
+        self.assertEqual(report.held, (P,))
+        self.assertIn(store_backup.HELD_LINE.format(name=P), report.lines())
+
+    def test_restore_refused_confirmation_leaves_live(self):
+        self.make(P)
+        backup = self.snapshot()
+        old = store_layout.read_store_id(self.root), self.digest(P)
+        report = self.restore(backup, confirm=False)
+        self.assertNotEqual(report.new_store_id, old[0])
+        self.assertEqual((store_layout.read_store_id(self.root), self.digest(P)), old)
+        self.assertEqual(self.ledger(P, 'SELECT * FROM restore_cancels'), [])
+
+    def test_restore_classing_refusals(self):
+        from contextlib import closing
+        from relay_engine import restore_cancel
+
+        for reason in ('active-without-row', 'relays-without-row', 'held', 'absent'):
+            with self.subTest(reason=reason):
+                self.reset(reason)
+                if reason != 'absent':
+                    self.make(P, active=reason == 'active-without-row')
+                backup = self.snapshot()
+                if reason == 'held':
+                    def hold(path):
+                        with closing(sqlite3.connect(path)) as cat, cat:
+                            cat.execute('UPDATE project_routes SET held_by_job=? WHERE project_id=?',
+                                        (JOB, P)).close()
+                    self.seal(backup, 'machine.sqlite3', hold)
+                def alter(path):
+                    if reason == 'absent':
+                        self.empty_file(path, P)
+                    elif reason in ('active-without-row', 'relays-without-row'):
+                        with closing(sqlite3.connect(path)) as conn, conn:
+                            if reason == 'relays-without-row':
+                                conn.execute("INSERT INTO relays(id,handle,project_id,kind,needs,subject,"
+                                             " sender_special,created_at,body_sha256,meta_sha256,body_bytes,"
+                                             " header_bytes) VALUES('r',1,?,'SITREP','none','test','operator',?,"
+                                             " ?,?,0,0)", (P, NOW, 'a'*64, 'b'*64)).close()
+                            conn.execute('DELETE FROM projects').close()
+                self.seal(backup, f'projects/{P}/ledger.sqlite3', alter)
+                self.assertTrue(callable(store_backup.restore))
+                with mock.patch.object(restore_cancel, 'cancel_all', wraps=restore_cancel.cancel_all) as calls:
+                    with self.assertRaises(store_backup.RestoreRefused) as caught:
+                        self.restore(backup)
+                self.assertEqual(caught.exception.reason, 'unclassed-ledger')
+                self.assertEqual(caught.exception.detail[0], P)
+                calls.assert_not_called()
+                with closing(store_steps.open_journal(self.root / 'recovery' / JOB)) as journal:
+                    self.assertNotIn('restore-classes', [x[0] for x in store_backup._rows(
+                        journal._conn, 'SELECT phase FROM checkpoints')])
