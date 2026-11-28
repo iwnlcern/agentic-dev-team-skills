@@ -289,6 +289,8 @@ def raise_item(conn, principal, request: RaiseRequest, now_ms, *, enabled: froze
     if row.keys is not None and (not isinstance(request.condition_key, str)
                                  or request.condition_key not in row.keys):
         return invalid
+    if request.subkind == 'approval_seal_unusable' and not kinds.seal_key_valid(request.condition_key):
+        return invalid
     if request.subkind in ('seat_record_missing', 'seat_ambiguous'):
         if not kinds.act_lookup_args_valid(request.subkind, request.condition_key, request.pins):
             return invalid

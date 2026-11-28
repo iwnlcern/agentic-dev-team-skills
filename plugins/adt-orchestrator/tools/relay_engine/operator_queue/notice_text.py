@@ -21,6 +21,57 @@ UNSEAT_SENTENCES = {
 MERGE_ALARM_SENTENCE = 'PR #<pr> was merged onto <landed target>, but its go-ahead allowed only <allowed target>. If this merge should not stand, revert its merge commit from your own terminal: <full commit id>'
 
 
+CAUSE_PHRASES: Mapping[str, str] = {
+    'folder_unusable': "the approval-seal folder or this project's files in it are missing or cannot be read or written",
+    'counter_unusable': "the approval counter is damaged or does not match this project's ledger",
+    'high_water_unusable': "the record of what has been written out is damaged or does not match this project's ledger",
+    'pointer_unset': "setting up this project's approval counter did not finish",
+    'ledger_chain_mismatch': "this project's ledger does not match its approval record, as after a restore from a backup",
+    'pointer_damaged': "the record of which approval history this project is on is damaged or was replaced from outside v3",
+}
+_POINTER_DAMAGED_SUFFIX = (
+    "If v3 cannot read which approval history a project is on, run adopt-restored from the item that names it; "
+    "as after any restore through Store's restore command, every go-ahead and approval in the store is then "
+    "cancelled and every project held until you end the hold."
+)
+_SEAL_RING_TEXT = (
+    "Approvals cannot be recorded; anything you cancel now stays in force until you cancel it again after a fix. "
+    "To bar its agents' approvals now: adt engine stop --project <project>"
+)
+
+
+def seal_texts(cause: str, chain_id: str) -> Mapping[str, str]:
+    sentence = (
+        f"Approvals in <project> cannot be recorded: {CAUSE_PHRASES[cause]}. "
+        "Work already approved carries on; new permissions, withdrawals, reviews, "
+        "waivers, reviewer changes and the first commit on a new branch wait until it is fixed."
+    )
+    if cause == 'pointer_damaged':
+        sentence += ' ' + _POINTER_DAMAGED_SUFFIX
+    return {
+        'sentence': sentence,
+        'subject': f'{cause} (chain {fit_value(chain_id)})' if chain_id != 'none' else cause,
+        'caused_by': 'the approval seal',
+        'ring_text': _SEAL_RING_TEXT,
+    }
+
+
+def backup_texts() -> Mapping[str, str]:
+    return {
+        'sentence': (
+            "The approval-seal folder on this machine may be included in backups. Approvals record as usual. "
+            "If an old backup of this folder alone is put back, approvals may stop being recorded until it is fixed. "
+            "Each start tries again to exclude it."
+        ),
+        'subject': 'the approval-seal folder',
+        'caused_by': 'the approval seal',
+    }
+
+
+def backup_pins() -> Mapping:
+    return {'folder': 'approval_seal'}
+
+
 def fit_value(value: str) -> str:
     value = value.replace('\x00', '\ufffd')
     data = value.encode('utf-8')

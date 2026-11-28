@@ -40,6 +40,30 @@ SEATS = {
  'seat_stood_down':"Seat <seat> in <project> was stood down; no key signs in to it now."}
 
 
+SEAL_CAUSES = {
+    'folder_unusable': ('none', "the approval-seal folder or this project's files in it are missing or cannot be read or written"),
+    'counter_unusable': ('chain', "the approval counter is damaged or does not match this project's ledger"),
+    'high_water_unusable': ('chain', "the record of what has been written out is damaged or does not match this project's ledger"),
+    'pointer_unset': ('none', "setting up this project's approval counter did not finish"),
+    'ledger_chain_mismatch': ('chain', "this project's ledger does not match its approval record, as after a restore from a backup"),
+    'pointer_damaged': ('none', "the record of which approval history this project is on is damaged or was replaced from outside v3"),
+}
+POINTER_SUFFIX = (
+    "If v3 cannot read which approval history a project is on, run adopt-restored from the item that names it; "
+    "as after any restore through Store's restore command, every go-ahead and approval in the store is then "
+    "cancelled and every project held until you end the hold."
+)
+SEAL_RING = (
+    "Approvals cannot be recorded; anything you cancel now stays in force until you cancel it again after a fix. "
+    "To bar its agents' approvals now: adt engine stop --project <project>"
+)
+BACKUP_SENTENCE = (
+    "The approval-seal folder on this machine may be included in backups. Approvals record as usual. "
+    "If an old backup of this folder alone is put back, approvals may stop being recorded until it is fixed. "
+    "Each start tries again to exclude it."
+)
+
+
 def settlement(**changes):
     values=dict(position=1,row_id='row',subkind='settlement_finished',committed_at_ms=10,
                 chain_id='chain',runtime_instance_id='run',transaction_ordinal=1,
@@ -122,7 +146,9 @@ class TestNoticeText(unittest.TestCase):
                 self.assertEqual(result.cause_kind,'kind_not_raisable')
                 self.assertEqual(self.conn.total_changes,before)
         for subkind in ('approval_seal_unusable','approval_seal_backup_included'):
-            self.assertIsNone(kinds.raiser_row('notice',subkind,'approval_seal',enabled=frozenset({'pr3'})))
+            row = kinds.raiser_row('notice', subkind, 'approval_seal', enabled=kinds.ENABLED_TAGS)
+            self.assertIsNotNone(row)
+            self.assertEqual(row.enabled_in, 'pr3')
 
     def test_settlement_sentences_exact(self):
         self.assertEqual(self.n.SETTLEMENT_SENTENCES,SETTLEMENTS)
@@ -192,6 +218,18 @@ class TestNoticeText(unittest.TestCase):
             self.assertEqual(sentence.count('<project>'),1);self.assertNotIn(P,sentence)
         for key,text in self.n.SERVICE_SENTENCES.items():
             self.assertEqual(text.count('<project>'),int(key in ('project_started','project_stopped')))
+        builders = [self.n.seal_texts(cause, chain) for cause, (chain, _) in SEAL_CAUSES.items()]
+        backup = self.n.backup_texts()
+        self.assertEqual(backup, dict(sentence=BACKUP_SENTENCE, subject='the approval-seal folder',
+                                      caused_by='the approval seal'))
+        self.assertEqual(self.n.backup_pins(), {'folder': 'approval_seal'})
+        for texts in builders:
+            self.assertEqual(texts['sentence'].count('<project>'), 1)
+        for texts in [*builders, backup]:
+            for value in texts.values():
+                self.assertNotIn(P, value)
+                self.assertNotIn('billing-service', value)
+        self.assertNotIn('<project>', backup['sentence'])
 
     def test_seat_sentences_exact(self):
         self.assertEqual(self.n.SEAT_SENTENCES,SEATS)
@@ -248,6 +286,44 @@ class TestNoticeText(unittest.TestCase):
             before=self.conn.total_changes
             result=self.raise_text(row.subkind,dict(texts,title='bad'),pins(row))
             self.assertEqual(result.cause_kind,'subject_unresolved');self.assertEqual(self.conn.total_changes,before)
+
+        seal = ServicePrincipal('approval_seal')
+        subjects = [
+            ('approval_seal_unusable', P, {'chain_id': chain, 'cause': cause},
+             self.n.seal_texts(cause, chain))
+            for cause, (chain, _) in SEAL_CAUSES.items()
+        ]
+        subjects.append(('approval_seal_backup_included', None, 'backup_exclusion', self.n.backup_texts()))
+        for subkind, project, key, texts in subjects:
+            self.counter += 1
+            pins = key if project is not None else self.n.backup_pins()
+            self.assertLessEqual(set(texts), {'sentence', 'subject', 'caused_by', 'ring_text'})
+            for value in texts.values():
+                self.assertTrue(1 <= len(value.encode()) <= 4096)
+                self.assertNotIn('\0', value)
+            request = records.RaiseRequest('notice', subkind, project, texts, pins, key, str(self.counter))
+            self.assertIsInstance(records.raise_item(self.conn, seal, request, 100,
+                                                     enabled=kinds.ENABLED_TAGS), records.RaiseResult)
+
+    def test_seal_sentences_exact(self):
+        self.assertEqual(self.n.CAUSE_PHRASES, {cause: phrase for cause, (_, phrase) in SEAL_CAUSES.items()})
+        for cause, (chain, phrase) in SEAL_CAUSES.items():
+            with self.subTest(cause=cause):
+                expected = (f"Approvals in <project> cannot be recorded: {phrase}. "
+                            "Work already approved carries on; new permissions, withdrawals, reviews, "
+                            "waivers, reviewer changes and the first commit on a new branch wait until it is fixed.")
+                size = len(expected.replace('<project>', '').encode())
+                self.assertTrue(252 <= size <= 293)
+                if cause == 'pointer_damaged':
+                    expected += ' ' + POINTER_SUFFIX
+                    self.assertEqual(len(expected.replace('<project>', '').encode()), 559)
+                texts = self.n.seal_texts(cause, chain)
+                self.assertEqual(texts['sentence'], expected)
+                self.assertEqual(texts['ring_text'], SEAL_RING)
+                self.assertEqual(len(texts['ring_text'].replace('<project>', '').encode()), 168)
+                self.assertEqual(texts['caused_by'], 'the approval seal')
+                if chain != 'none':
+                    self.assertIn(chain, texts['subject'])
 
     def test_fit_value(self):
         for value,want in [('a'*512,'a'*512),('a'*513,'a'*509+'…'),('a'*508+'é'+'a'*3,'a'*508+'…'),('a\0b','a�b')]:

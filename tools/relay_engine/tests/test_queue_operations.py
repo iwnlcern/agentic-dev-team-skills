@@ -257,6 +257,19 @@ class TestQueueOperations(unittest.TestCase):
         for item in (other, machine):
             self.assertEqual(self.conn.execute('SELECT state FROM queue_items WHERE item_id=?', (item.item_id,)).fetchone(), ('pending',))
 
+    def test_dismiss_all_no_project_scope(self):
+        from relay_engine.api_principals import ServicePrincipal
+
+        doorbell = self.notice()
+        backup = self.fixture.raise_it(ServicePrincipal('approval_seal'), self.fixture.backup_request())
+        bound = records.next_position(self.conn)
+        result = operations.dismiss_all(self.conn, self.operator, P, bound, 'project', 200)
+        self.assertEqual(result['item_ids'], [doorbell.item_id])
+        self.assertEqual(self.get(backup.item_id)['item']['state'], 'pending')
+        result = operations.dismiss_all(self.conn, self.operator, 'machine', bound, 'machine', 201)
+        self.assertEqual(result['item_ids'], [backup.item_id])
+        self.assertEqual(self.get(backup.item_id)['item']['state'], 'dismissed')
+
     def test_operator_auth_and_receipt_conflict(self):
         item = self.notice()
         before = self.fixture.snapshot()

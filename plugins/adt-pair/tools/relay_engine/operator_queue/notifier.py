@@ -55,16 +55,20 @@ def _popup_text(kind, texts, popup):
 
 def due_notifications(conn, now_ms, limit: int) -> list[Notification]:
     rows = records._rows(conn, 'SELECT n.item_id,n.revision,i.project_id,i.actor_address,'
-                         'i.raiser,i.kind,i.texts,i.popup_text FROM queue_notifications n '
+                         'i.raiser,i.kind,i.subkind,i.texts,i.popup_text FROM queue_notifications n '
                          'JOIN queue_items i ON i.item_id=n.item_id '
                          "WHERE n.state='pending' AND n.next_attempt_at_ms<=? "
                          'ORDER BY i.raised_position,n.item_id,n.revision LIMIT ?',
                          (now_ms, max(0, limit)))
     notes = []
-    for item, revision, project, actor, raiser, kind, texts, popup in rows:
+    for item, revision, project, actor, raiser, kind, subkind, texts, popup in rows:
         name = None if project is None else store_layout.route(conn, project_id=project).name
+        texts = json.loads(texts)
+        text = _popup_text(kind, texts, popup)
+        if subkind == 'approval_seal_unusable' and name is not None and 'ring_text' in texts:
+            text = texts['ring_text'].replace('<project>', name)
         notes.append(Notification(item, revision, notification_title(name, actor if actor is not None else raiser),
-                                  _popup_text(kind, json.loads(texts), popup)))
+                                  text))
     return notes
 
 

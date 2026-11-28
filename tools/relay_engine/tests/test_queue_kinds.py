@@ -36,6 +36,9 @@ EXPECTED_MATRIX = (
     ('notice', 'merge_target_changed', 'internal', 'console_queue', 'pr3', None),
     ('notice', 'seat_unseated', 'internal', 'console_queue', 'pr3', None),
 
+    ('notice', 'approval_seal_unusable', 'queue.raise', 'approval_seal', 'pr3', None),
+    ('notice', 'approval_seal_backup_included', 'queue.raise', 'approval_seal', 'pr3',
+     frozenset({'backup_exclusion'})),
 )
 ALL_TAGS = frozenset({'pr1','pr2','pr3','pr3c','pr4','pr5','pr6'})
 NOTICE_NAMES = frozenset({'seat_registered','seat_replaced','seat_stood_down','seat_unseated',
@@ -86,7 +89,7 @@ class TestQueueKinds(unittest.TestCase):
 
     def test_ring_set(self):
         expected = frozenset({'question','cross_project_permission','merge_go_ahead','verification_held',
-                             'notice/doorbell_off','notice/instruction_carried','notice/worker_stalled','notice/bridge_refused','notice/answer_faulted','notice/backup_missed','notice/merge_target_changed'})
+                             'notice/doorbell_off','notice/instruction_carried','notice/worker_stalled','notice/bridge_refused','notice/answer_faulted','notice/backup_missed','notice/merge_target_changed','notice/approval_seal_unusable'})
         self.assertEqual(kinds.RING_SET,expected)
         for member in expected:
             parts=member.split('/')

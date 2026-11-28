@@ -360,8 +360,8 @@ for name in exports:
     def test_raise_seal_pins_and_dormant_wire_arms(self):
         seal = ServicePrincipal('approval_seal')
         arms = {
-            'approval_seal_unusable': (dict(chain_id='c', cause='pointer_unset'),
-                                       dict(chain_id='c', cause='pointer_unset')),
+            'approval_seal_unusable': (dict(chain_id='none', cause='pointer_unset'),
+                                       dict(chain_id='none', cause='pointer_unset')),
             'approval_seal_backup_included': (dict(value='backup_exclusion'),
                                               dict(folder='approval_seal')),
             'seat_record_missing': (dict(seat_id='s-a', session_digest='a' * 64),
@@ -373,43 +373,30 @@ for name in exports:
             args = dict(doorbell(), subkind=tag, project_id=None,
                         operation_key=tag, condition_key=dict(key, kind=tag),
                         pins=dict(pins, kind=tag))
-            self.assertEqual(self.call('queue.raise', args, seal)['error']['cause']['kind'],
-                             'kind_not_raisable')
+            if tag in ('seat_record_missing', 'seat_ambiguous'):
+                self.assertEqual(self.call('queue.raise', args, seal)['error']['cause']['kind'],
+                                 'kind_not_raisable')
             for member in ('condition_key', 'pins'):
                 bad = dict(args[member], extra='value')
                 self.assertEqual(self.call('queue.raise', dict(args, **{member: bad}), seal)
                                  ['error']['cause']['kind'], 'invalid_args')
         self.assertEqual(self.fixture.snapshot(), before)
 
-        # Task 10 exposes the wire arms while the pinned production catalogue
-        # still rejects seal rows. Enable persistence only in this test fixture.
-        def with_seal_rows(fn):
-            def apply(conn):
-                conn.execute('PRAGMA ignore_check_constraints=ON').close()
-                try:
-                    return fn(conn)
-                finally:
-                    conn.execute('PRAGMA ignore_check_constraints=OFF').close()
-            return self.port.run(self.fixture.root / 'machine.sqlite3', apply, transaction=True)
-
         for tag, project_id in (('approval_seal_unusable', P),
                                 ('approval_seal_backup_included', None)):
             key, pins = arms[tag]
-            row = kinds.RaiserRow('notice', tag, 'queue.raise', 'approval_seal', 'pr5', None)
-            with (patch.object(kinds, 'RAISER_MATRIX', (*kinds.RAISER_MATRIX, row)),
-                  patch.object(self.port, 'catalogue', side_effect=with_seal_rows)):
-                args = dict(doorbell(), subkind=tag, project_id=project_id, operation_key=tag,
-                            condition_key=dict(key, kind=tag), pins=dict(pins, kind=tag))
-                reply = self.call('queue.raise', args, seal)
-                self.assertIn('result', reply, f'{tag}: {reply!r}')
-                raised = reply['result']
-                retried = self.service.run('queue.raise', dict(args, pins=pins,
-                    condition_key=key.get('value', key)), seal)
-                self.assertEqual(retried['item_id'], raised['item_id'])
-                self.assertTrue(retried['replayed'])
-                item = self.call('queue.get', dict(item_id=raised['item_id'],
-                    history_page_size='1', history_continuation=None))['result']['item']
-                self.assertEqual(json.loads(item['pins']), pins)
+            args = dict(doorbell(), subkind=tag, project_id=project_id, operation_key=tag,
+                        condition_key=dict(key, kind=tag), pins=dict(pins, kind=tag))
+            reply = self.call('queue.raise', args, seal)
+            self.assertIn('result', reply, f'{tag}: {reply!r}')
+            raised = reply['result']
+            retried = self.service.run('queue.raise', dict(args, pins=pins,
+                condition_key=key.get('value', key)), seal)
+            self.assertEqual(retried['item_id'], raised['item_id'])
+            self.assertTrue(retried['replayed'])
+            item = self.call('queue.get', dict(item_id=raised['item_id'],
+                history_page_size='1', history_continuation=None))['result']['item']
+            self.assertEqual(json.loads(item['pins']), pins)
 
     def test_registered_worker_checks_actor_address(self):
         subject = dict(kind='worker_stalled', value='queue_reconcile')

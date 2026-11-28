@@ -79,10 +79,14 @@ RAISER_MATRIX = (
     RaiserRow('notice', 'engine_was_down', 'internal', 'console_queue', 'pr3', None),
     RaiserRow('notice', 'merge_target_changed', 'internal', 'console_queue', 'pr3', None),
     RaiserRow('notice', 'seat_unseated', 'internal', 'console_queue', 'pr3', None),
+    RaiserRow('notice', 'approval_seal_unusable', 'queue.raise', 'approval_seal', 'pr3', None),
+    RaiserRow('notice', 'approval_seal_backup_included', 'queue.raise', 'approval_seal', 'pr3',
+              frozenset({'backup_exclusion'})),
 )
 
 RING_SET = frozenset({'question', 'cross_project_permission', 'merge_go_ahead', 'verification_held',
-    'notice/doorbell_off', 'notice/instruction_carried', 'notice/worker_stalled', 'notice/bridge_refused', 'notice/answer_faulted', 'notice/backup_missed', 'notice/merge_target_changed'})
+    'notice/doorbell_off', 'notice/instruction_carried', 'notice/worker_stalled', 'notice/bridge_refused', 'notice/answer_faulted', 'notice/backup_missed', 'notice/merge_target_changed',
+    'notice/approval_seal_unusable'})
 FIXED_TEXTS: Mapping[tuple[str, str], str] = MappingProxyType({('worker_stalled', 'queue_question_ingest'): "v3 has stopped turning agents' questions into "
                                               'items, so new questions are not shown. Run adt '
                                               'engine status.',
@@ -114,6 +118,19 @@ ANSWER_FAULTED_TEXTS: Mapping[str, str] = MappingProxyType({
     'question': "v3 stopped an answer you gave: a different version had already been sent to this agent, which only a fault in v3 can cause. Open the question on v3's page to check it.",
 })
 PIN_TOKENS: Mapping[str, tuple[str, str]] = MappingProxyType({})
+
+
+def seal_key_valid(key: Mapping) -> bool:
+    if not isinstance(key, Mapping) or key.keys() != {'chain_id', 'cause'}:
+        return False
+    chain, cause = key['chain_id'], key['cause']
+    if not isinstance(chain, str) or not isinstance(cause, str):
+        return False
+    if chain == 'none':
+        return cause in {'pointer_unset', 'folder_unusable', 'pointer_damaged'}
+    return bool(chain) and '\0' not in chain and cause in {
+        'counter_unusable', 'high_water_unusable', 'ledger_chain_mismatch',
+    }
 
 
 def raiser_row(kind: str, subkind: str | None, principal: str, *, enabled: frozenset[str]) -> RaiserRow | None:

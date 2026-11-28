@@ -368,6 +368,88 @@ class TestQueueRecords(unittest.TestCase):
         self.assertEqual([r.item_id for r in records.open_condition_items(self.conn, self.engine, P)], [doorbell.item_id])
         self.assertEqual([r.item_id for r in records.open_condition_items(self.conn, self.authority, P)], [merge.item_id])
 
+    def test_seal_condition_matrix(self):
+        from relay_engine.operator_queue import notice_text
+        from relay_engine.tests.test_queue_notice_text import POINTER_SUFFIX, SEAL_CAUSES
+
+        seal = ServicePrincipal('approval_seal')
+        for cause, (chain, _) in SEAL_CAUSES.items():
+            with self.subTest(cause=cause):
+                key = dict(chain_id=chain, cause=cause)
+                request = self.request(subkind='approval_seal_unusable', key=key, pins=key,
+                                       texts=notice_text.seal_texts(cause, chain))
+                item = self.raise_it(seal, request)
+                saved = json.loads(self.conn.execute('SELECT texts FROM queue_items WHERE item_id=?',
+                                                     (item.item_id,)).fetchone()[0])
+                self.assertEqual(saved['sentence'].endswith(POINTER_SUFFIX), cause == 'pointer_damaged')
+                before = self.snapshot()
+                self.assertEqual(self.raise_it(seal, replace(request, operation_key='repeat-' + cause)).item_id,
+                                 item.item_id)
+                for table in ('queue_items', 'queue_conditions', 'queue_events', 'queue_notifications'):
+                    self.assertEqual(self.snapshot()[table], before[table])
+                self.assertEqual(self.clear(item, seal, request).outcome, 'cleared')
+        for chain, cause in [('chain', 'unknown'), ('none', 'counter_unusable'),
+                             *[('chain', cause) for cause in ('folder_unusable', 'pointer_unset', 'pointer_damaged')]]:
+            self.refusal(seal, self.request(subkind='approval_seal_unusable',
+                                           key=dict(chain_id=chain, cause=cause)))
+        request = self.request(subkind='approval_seal_unusable',
+                               key=dict(chain_id='none', cause='folder_unusable'))
+        for principal in (self.authority, ServicePrincipal('console_queue'), self.internal, self.seat):
+            self.refusal(principal, request, 'kind_not_raisable')
+        self.refusal(seal, self.request(), 'kind_not_raisable')
+
+    def backup_request(self, **changes):
+        return self.request(subkind='approval_seal_backup_included', project=None,
+                            key='backup_exclusion', **changes)
+
+    def test_backup_notice_matrix(self):
+        seal = ServicePrincipal('approval_seal')
+        self.conn.execute('DELETE FROM project_routes').close()
+        self.assertEqual(self.rows('project_routes'), [])
+        request = self.backup_request()
+        item = self.raise_it(seal, request)
+        self.assertEqual(len(self.rows('queue_items')), 1)
+        self.assertEqual(len(records.open_condition_items(self.conn, seal, None)), 1)
+        before = self.snapshot()
+        self.assertEqual(self.raise_it(seal, replace(request, operation_key='again')).item_id, item.item_id)
+        for table in ('queue_items', 'queue_conditions', 'queue_events', 'queue_notifications'):
+            self.assertEqual(self.snapshot()[table], before[table])
+        self.assertEqual(self.clear(item, seal, request).outcome, 'cleared')
+        self.refusal(seal, replace(request, project_id=P))
+        self.refusal(seal, replace(request, condition_key='other'))
+        for principal in (self.authority, ServicePrincipal('console_queue'), self.internal, self.seat):
+            self.refusal(principal, request, 'kind_not_raisable')
+        self.refusal(self.internal, self.request(subkind='seat_registered', project=None))
+        self.refusal(self.authority, self.request(kind='merge_go_ahead', subkind=None, project=None))
+
+    def test_no_project_untouched_by_undo(self):
+        seal = ServicePrincipal('approval_seal')
+        machine = self.raise_it(seal, self.backup_request())
+        doorbell = self.raise_it()
+        before = self.snapshot()
+        result = records.undo_step(self.conn, P, 'undo', now_ms=300)
+        self.assertEqual(result.retired_item_ids, (doorbell.item_id,))
+        self.assertEqual(result.closed_condition_item_ids, (doorbell.item_id,))
+        for table in ('queue_items', 'queue_conditions', 'queue_notifications'):
+            self.assertEqual(self.rows(table, ' WHERE item_id=?', (machine.item_id,)),
+                             [row for row in before[table] if row[0] == machine.item_id])
+        self.assertEqual([row.item_id for row in records.open_condition_items(self.conn, seal, None)],
+                         [machine.item_id])
+        self.assertEqual(records.open_condition_items(self.conn, self.engine, P), [])
+
+    def test_no_project_recover_and_clear(self):
+        seal = ServicePrincipal('approval_seal')
+        request = self.backup_request()
+        item = self.raise_it(seal, request)
+        self.assertEqual([row.item_id for row in records.open_condition_items(self.conn, seal, None)],
+                         [item.item_id])
+        self.assertEqual(records.open_condition_items(self.conn, self.engine, None), [])
+        before = self.snapshot()
+        self.assertEqual(self.clear(item, self.engine, request).cause_kind, 'subject_unresolved')
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.clear(item, seal, request).outcome, 'cleared')
+        self.assertEqual(records.open_condition_items(self.conn, seal, None), [])
+
     def test_undo_retires_and_closes(self):
         a = self.raise_it()
         b = self.raise_it(self.internal, self.request(subkind='seat_registered', key='seat'))

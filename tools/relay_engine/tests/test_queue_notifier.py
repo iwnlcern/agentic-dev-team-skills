@@ -433,6 +433,64 @@ class TestQueueNotifier(unittest.TestCase):
         self.assertEqual(calls[0][-2], 'v3: supervision')
         self.assertIsNone(self.row(unhealthy))
 
+    def raise_seal(self, subkind, project, key, texts, pins):
+        self.sequence += 1
+        item = records.raise_item(self.conn, ServicePrincipal('approval_seal'),
+            records.RaiseRequest('notice', subkind, project, texts, pins, key, str(self.sequence)),
+            100 + self.sequence, enabled=kinds.ENABLED_TAGS)
+        self.assertIsInstance(item, records.RaiseResult)
+        self.conn.commit()
+        return item
+
+    def test_seal_condition_rings(self):
+        from relay_engine.operator_queue import notice_text
+        from relay_engine.tests.test_queue_notice_text import SEAL_RING
+
+        self.conn.execute("UPDATE project_routes SET name=? WHERE project_id=?",
+                          ('customer-onboarding-and-identity', Q)).close()
+        for project, name, cause, size in [
+            (Q, 'customer-onboarding-and-identity', 'folder_unusable', 200),
+            (P, 'billing-service', 'pointer_damaged', 183),
+        ]:
+            key = dict(chain_id='none', cause=cause)
+            texts = notice_text.seal_texts(cause, 'none')
+            item = self.raise_seal('approval_seal_unusable', project, key, texts, key)
+            notifications = [note for note in notifier.due_notifications(self.conn, 3000, 10)
+                             if note.item_id == item.item_id]
+            self.assertEqual(len(notifications), 1)
+            text = notifier.alarm_argv(notifications[0].title, notifications[0].text, 'notify-send')[-1]
+            self.assertEqual(text, SEAL_RING.replace('<project>', name))
+            self.assertEqual(len(text.encode()), size)
+            self.assertNotIn(MARK, text)
+            self.assertIn(MARK, notifier.alarm_argv('title', texts['sentence'].replace('<project>', name),
+                                                    'notify-send')[-1])
+        with mock.patch.object(kinds, 'RING_SET', kinds.RING_SET - {'notice/approval_seal_unusable'}):
+            key = dict(chain_id='none', cause='pointer_unset')
+            silent = self.raise_seal('approval_seal_unusable', P, key,
+                                     notice_text.seal_texts('pointer_unset', 'none'), key)
+            self.assertIsNone(self.row(silent))
+        settlement, _, _ = self.raise_it('notice', 'settlement_finished')
+        self.assertIsNone(self.row(settlement))
+
+    def test_backup_notice_text_and_no_ring(self):
+        from relay_engine.operator_queue import notice_text
+        from relay_engine.tests.test_queue_notice_text import BACKUP_SENTENCE
+
+        texts = notice_text.backup_texts()
+        self.assertEqual(texts['sentence'], BACKUP_SENTENCE)
+        self.assertEqual(len(texts['sentence'].encode()), 237)
+        backup = self.raise_seal('approval_seal_backup_included', None, 'backup_exclusion',
+                                 texts, notice_text.backup_pins())
+        self.assertIsNone(self.row(backup))
+        for mode in ('none', 'notify-send'):
+            calls = []
+            notifier.notify_pass(self.port, calls.append, 3000, notifier=mode)
+            self.assertEqual(calls, [])
+        key = dict(chain_id='none', cause='folder_unusable')
+        ringing = self.raise_seal('approval_seal_unusable', P, key,
+                                  notice_text.seal_texts('folder_unusable', 'none'), key)
+        self.assertIsNotNone(self.row(ringing))
+
     def test_failed_entry_retries_after_due(self):
         item, _, _ = self.raise_it()
         self.run_pass(self.delivery_failure)
