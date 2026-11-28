@@ -284,10 +284,13 @@ def raise_item(conn, principal, request: RaiseRequest, now_ms, *, enabled: froze
     if row is None or row.entry != entry:
         return QueueRefusal('E_QUEUE_INVALID', 'kind_not_raisable')
     invalid = QueueRefusal('E_QUEUE_INVALID', 'subject_unresolved')
-    if (request.project_id is None) != (request.subkind in kinds.NO_PROJECT_SUBKINDS):
+    if (request.subkind not in kinds.EITHER_PROJECT_SUBKINDS
+            and (request.project_id is None) != (request.subkind in kinds.NO_PROJECT_SUBKINDS)):
         return invalid
     if row.keys is not None and (not isinstance(request.condition_key, str)
                                  or request.condition_key not in row.keys):
+        return invalid
+    if request.subkind == 'approval_seal_unusable' and not kinds.seal_key_valid(request.condition_key):
         return invalid
     if request.subkind in ('seat_record_missing', 'seat_ambiguous'):
         if not kinds.act_lookup_args_valid(request.subkind, request.condition_key, request.pins):

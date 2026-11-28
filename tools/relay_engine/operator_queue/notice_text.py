@@ -1,5 +1,6 @@
 """Lifecycle notice text and lossless pins, built from committed outbox rows."""
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 FREE_VALUE_MAX_BYTES = 512
 
@@ -19,6 +20,57 @@ UNSEAT_SENTENCES = {
     'instructed': '<seat> was unseated at <time> by the top-level planner on your instruction <relay id>. Its window can no longer send relays, commit or merge as that agent until it signs in again.',
 }
 MERGE_ALARM_SENTENCE = 'PR #<pr> was merged onto <landed target>, but its go-ahead allowed only <allowed target>. If this merge should not stand, revert its merge commit from your own terminal: <full commit id>'
+
+
+CAUSE_PHRASES: Mapping[str, str] = {
+    'folder_unusable': "the approval-seal folder or this project's files in it are missing or cannot be read or written",
+    'counter_unusable': "the approval counter is damaged or does not match this project's ledger",
+    'high_water_unusable': "the record of what has been written out is damaged or does not match this project's ledger",
+    'pointer_unset': "setting up this project's approval counter did not finish",
+    'ledger_chain_mismatch': "this project's ledger does not match its approval record, as after a restore from a backup",
+    'pointer_damaged': "the record of which approval history this project is on is damaged or was replaced from outside v3",
+}
+_POINTER_DAMAGED_SUFFIX = (
+    "If v3 cannot read which approval history a project is on, run adopt-restored from the item that names it; "
+    "as after any restore through Store's restore command, every go-ahead and approval in the store is then "
+    "cancelled and every project held until you end the hold."
+)
+_SEAL_RING_TEXT = (
+    "Approvals cannot be recorded; anything you cancel now stays in force until you cancel it again after a fix. "
+    "To bar its agents' approvals now: adt engine stop --project <project>"
+)
+
+
+def seal_texts(cause: str, chain_id: str) -> Mapping[str, str]:
+    sentence = (
+        f"Approvals in <project> cannot be recorded: {CAUSE_PHRASES[cause]}. "
+        "Work already approved carries on; new permissions, withdrawals, reviews, "
+        "waivers, reviewer changes and the first commit on a new branch wait until it is fixed."
+    )
+    if cause == 'pointer_damaged':
+        sentence += ' ' + _POINTER_DAMAGED_SUFFIX
+    return {
+        'sentence': sentence,
+        'subject': f'{cause} (chain {fit_value(chain_id)})' if chain_id != 'none' else cause,
+        'caused_by': 'the approval seal',
+        'ring_text': _SEAL_RING_TEXT,
+    }
+
+
+def backup_texts() -> Mapping[str, str]:
+    return {
+        'sentence': (
+            "The approval-seal folder on this machine may be included in backups. Approvals record as usual. "
+            "If an old backup of this folder alone is put back, approvals may stop being recorded until it is fixed. "
+            "Each start tries again to exclude it."
+        ),
+        'subject': 'the approval-seal folder',
+        'caused_by': 'the approval seal',
+    }
+
+
+def backup_pins() -> Mapping:
+    return {'folder': 'approval_seal'}
 
 
 def fit_value(value: str) -> str:
@@ -135,3 +187,79 @@ def merge_alarm_pins(row) -> Mapping:
     return fit_integers({'row_id': row.row_id, 'position': row.position,
                          'slip_id': row.slip_id, 'pr': row.pr, 'merge_commit': row.merge_commit,
                          'allowed_target': row.allowed_target, 'landed_target': row.landed_target})
+
+
+@dataclass(frozen=True)
+class StoreItemRow:
+    id: int
+    kind: str
+    project_id: str | None
+    subject: str
+    ends: int | None
+    at: str | int
+    fields: Mapping
+
+
+def store_item_texts(row: StoreItemRow) -> tuple[Mapping[str, str], Mapping] | str:
+    """Build the display text and pins, or the first invalid field or text member."""
+    from relay_engine.operator_queue.notifier import popup_time
+
+    if row.kind == 'report_awaiting_confirmation':
+        names = ('report_path',)
+    elif row.kind == 'restore_command_started':
+        names = ('command', 'scope', 'started_at')
+    else:
+        return f'unknown_kind:{row.kind}'
+
+    fields = row.fields
+    for name in names:
+        if not isinstance(fields, Mapping) or name not in fields:
+            return f'missing_field:{name}'
+        value = fields[name]
+        if name == 'command':
+            if (not isinstance(value, str)
+                    or (value not in ('restore', 'adopt-restored', 'new-folder pass', 'resolve-reservation')
+                        and not (value.startswith('abandon ') and value[8:].strip()))):
+                return 'bad_field:command'
+        elif name == 'scope':
+            ending = ', which is still being created'
+            creating = (isinstance(value, str) and value.endswith(ending)
+                        and len(value) > len(ending) and '<' not in value[:-len(ending)])
+            if not (value == 'the whole store'
+                    or (row.project_id is not None and value == 'project <project>')
+                    or (row.project_id is None and creating)):
+                return 'bad_field:scope'
+        elif name == 'started_at':
+            try:
+                popup_time(value)
+            except ValueError:
+                return 'bad_field:started_at'
+        elif not isinstance(value, str):
+            return f'bad_field:{name}'
+
+    if row.kind == 'report_awaiting_confirmation':
+        sentence = (f'Projects wait until you confirm you have seen the report of restore job {row.subject}: '
+                    f'run adt store confirm-report {row.subject}. The report is at {fields["report_path"]}.')
+        pins = {}
+    else:
+        command, scope, at = fields['command'], fields['scope'], fields['started_at']
+        sentence = f'A restore command started: {command} for {scope}, run at <time> after the operator check passed.'
+        if command == 'resolve-reservation':
+            if row.project_id is None:
+                return 'bad_field:project_id'
+            sentence += (" It answers the question about <project>'s unfinished changes and grants nothing: "
+                         'a no undoes them, with a notice for each, unless the store was put back, when nothing '
+                         'changes and <project> waits for adopt-restored; a yes or not sure starts adopt-restored.')
+        elif command.startswith('abandon '):
+            sentence += (f' It withdraws nothing and grants nothing; {scope} stays held until the step its '
+                         'report names has run.')
+        else:
+            sentence += ' It will withdraw go-aheads and approvals there and grants none; what it did follows in its report.'
+        pins = {'at': at}
+
+    try:
+        if not sentence or '\x00' in sentence or len(sentence.encode('utf-8')) > 4096:
+            return 'bad_texts:sentence'
+    except UnicodeEncodeError:
+        return 'bad_texts:sentence'
+    return {'sentence': sentence}, pins

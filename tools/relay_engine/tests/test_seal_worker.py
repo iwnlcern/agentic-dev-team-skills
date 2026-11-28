@@ -1218,17 +1218,247 @@ class TestSealWorker(unittest.TestCase):
                 self.assertNotIn(repr(secret),text)
                 self.assertNotIn(secret.hex(),text)
 
+    def test_seal_hooks_forward_deadline(self):
+        from relay_engine.api_writer import StopDeadline
+        renderer, worker = mock.Mock(), mock.Mock()
+        deadline = StopDeadline()
+        hooks = self.m.SealHooks(renderer, worker)
+        hooks.ledger_closing(P, deadline=deadline)
+        hooks.catalogue_closing(deadline=deadline)
+        renderer.ledger_closing.assert_called_once_with(P, deadline=deadline)
+        worker.catalogue_closing.assert_called_once_with(deadline=deadline)
+
+    def test_closing_half_waits_take_remainder(self):
+        from relay_engine.api_writer import StopDeadline
+        for initial, arm_during_wait, expected in (
+                (0.5, False, [0.5]), (None, False, [5, 5]), (None, True, [5])):
+            with self.subTest(initial=initial, late_arm=arm_during_wait):
+                worker = self.worker(opened=False)
+                deadline = StopDeadline()
+                if initial is not None:
+                    deadline._arm(initial)
+                now, waits = [0.0], []
+                def wait(done, seconds):
+                    waits.append(seconds)
+                    if arm_during_wait:
+                        deadline._arm(now[0] + 4)
+                    now[0] += seconds
+                    return False
+                worker.wait = wait
+                with mock.patch.object(self.m, 'monotonic', lambda: now[0], create=True):
+                    worker.catalogue_closing(deadline=deadline)
+                self.assertEqual(waits, expected)
+
+    def test_closing_zero_budget_fences_without_waiting(self):
+        from relay_engine.api_writer import StopDeadline
+        worker = self.worker()
+        deadline = StopDeadline()
+        deadline._arm(0)
+        worker.wait = mock.Mock(side_effect=AssertionError('zero budget waited'))
+        worker.catalogue_closing(deadline=deadline)
+        self.assertFalse(worker._leave)
+        worker.wait.assert_not_called()
+
+    def test_closing_without_stop_keeps_10s(self):
+        from relay_engine.api_writer import StopDeadline
+        worker = self.worker(opened=False)
+        worker.wait = mock.Mock(return_value=False)
+        worker.catalogue_closing(deadline=StopDeadline())
+        self.assertEqual([c.args[1] for c in worker.wait.call_args_list], [5, 5])
+
+    def test_catalogue_ack_per_acquired_reader(self):
+        for mode, expected in (
+                ('normal', True), ('stale', True), ('stale_raise', False),
+                ('read', True), ('read_raise', False),
+                ('failed_open', True), ('never_held', True)):
+            with self.subTest(mode=mode):
+                worker = self.worker(opened=False)
+                tick = self.workers[-1][1]
+                began, release = threading.Event(), threading.Event()
+                self.addCleanup(release.set)
+                def open_reader(root):
+                    if mode.startswith('stale') or mode == 'never_held':
+                        began.set()
+                        await_event(release)
+                    if mode in ('failed_open', 'never_held'):
+                        raise OSError('failed open')
+                    reader = self.opener(root)
+                    close = reader.close
+                    if mode.endswith('_raise'):
+                        def raise_after_close():
+                            close()
+                            raise OSError('failed close')
+                        reader.close = raise_after_close
+                    return reader
+                worker.open_catalogue_reader = open_reader
+                worker.wait = lambda event, seconds: event.wait(2)
+                worker.catalogue_opened()
+                if mode.startswith('stale') or mode == 'never_held':
+                    await_event(began)
+                    original_wait = worker.wait
+                    def wait(event, seconds):
+                        release.set()
+                        return original_wait(event, seconds)
+                    worker.wait = wait
+                else:
+                    self.sync(worker)
+                if mode.startswith('read'):
+                    def read_fault(*args):
+                        raise OSError('failed read')
+                    worker.route_state = read_fault
+                    self.damage()
+                    self.refuse()
+                    self.sync(worker)
+                try:
+                    self.assertIs(worker.catalogue_closing(), expected)
+                finally:
+                    release.set()
+                    tick.finish()
+
+    def test_late_confirmation_edge(self):
+        for publish_before_read in (False, True):
+            with self.subTest(publish_before_read=publish_before_read):
+                worker = self.worker()
+                original = worker._reader.close
+                entered, release = threading.Event(), threading.Event()
+                def close():
+                    entered.set()
+                    await_event(release)
+                    original()
+                worker._reader.close = close
+                self.addCleanup(release.set)
+                calls = []
+                def wait(event, seconds):
+                    calls.append(seconds)
+                    if len(calls) == 2 and publish_before_read:
+                        release.set()
+                        await_event(event)
+                    return False
+                worker.wait = wait
+                try:
+                    answer = worker.catalogue_closing()
+                finally:
+                    release.set()
+                await_event(entered)
+                self.sync(worker)
+                self.assertIs(answer, publish_before_read)
+
+    def test_worker_stop_deadline_with_held_catalogue_read(self):
+        from time import monotonic
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        armed = threading.Event()
+        def route(conn, project):
+            if armed.is_set():
+                entered.set()
+                await_event(release)
+            return store_layout.route_state(conn, project)
+        worker = self.worker(route_state=route)
+        _, ticker, _ = self.workers[-1]
+        ticker.finish()
+        worker._ticker.join(5)
+        self.assertFalse(worker._ticker.is_alive())
+        armed.set()
+        self.damage()
+        producer = threading.Thread(target=self.refuse, daemon=True)
+        producer.start()
+        try:
+            await_event(entered)
+            self.assertIs(worker.stop(monotonic()), False)
+            self.assertFalse(self.readers[-1].closed)
+        finally:
+            release.set()
+            producer.join(5)
+        self.assertTrue(producer.is_alive() is False)
+
+    def test_worker_stop_needs_owner_close_ack(self):
+        from time import monotonic
+        entered, release = threading.Event(), threading.Event()
+        worker = self.worker()
+        self.workers[-1][1].finish()
+        reader = worker._reader
+        original = reader.close
+        def close():
+            entered.set()
+            await_event(release)
+            original()
+        reader.close = close
+        try:
+            result = worker.stop(monotonic())
+            await_event(entered)
+            self.assertIsNone(worker._reader)
+            self.assertIs(result, False)
+        finally:
+            release.set()
+        self.assertIs(worker.stop(), True)
+
+    def test_worker_second_thread_start_failure(self):
+        worker = self.worker(opened=False)
+        self.stop(worker)
+        # Start a fresh instance with the same fixture inputs without launching it.
+        with mock.patch.object(self.m.SealWorker, 'start', lambda self: self._idle.set()):
+            worker = self.worker(opened=False)
+        original = threading.Thread.start
+        def start(thread):
+            if thread.name == 'seal-worker-tick':
+                raise RuntimeError('ticker start fault')
+            original(thread)
+        with mock.patch.object(threading.Thread, 'start', start):
+            with self.assertRaisesRegex(RuntimeError, 'ticker start fault'):
+                worker.start()
+        self.assertIs(worker.stop(), True)
+
+    def test_raising_close_keeps_stop_false(self):
+        from time import monotonic
+
+        worker = self.worker()
+        original = worker._reader.close
+        def broken_close():
+            original()
+            raise OSError('close outcome unavailable')
+        worker._reader.close = broken_close
+        self.workers[-1][1].finish()
+        owner = worker._thread
+        worker.stop(monotonic() + 5)
+        owner.join(timeout=5)
+        self.assertFalse(owner.is_alive())
+        self.assertIs(worker.stop(monotonic() + 5), False)
+
+    def test_worker_rejected_candidate_reader_acknowledged(self):
+        entered, release = threading.Event(), threading.Event()
+        def open_reader(root):
+            entered.set()
+            await_event(release)
+            reader = self.opener(root)
+            original = reader.close
+            def close():
+                original()
+                raise OSError('candidate close failure')
+            reader.close = close
+            return reader
+        worker = self.worker(opened=False, open_catalogue_reader=open_reader)
+        self.workers[-1][1].finish()
+        worker.catalogue_opened()
+        try:
+            await_event(entered)
+            worker.wait = lambda event, seconds: release.set() or event.wait(2)
+            self.assertIs(worker.catalogue_closing(), False)
+        finally:
+            release.set()
+        self.assertIs(worker.stop(), False)
+
     def test_hooks_object_delegates(self):
         calls=[];owner=threading.get_ident()
         class Delegate:
             def __getattr__(self,name):
-                return lambda *a:calls.append((name,a,threading.get_ident()))
+                return lambda *a, **kw:calls.append((name,a,threading.get_ident(),kw))
         hooks=self.m.SealHooks(Delegate(),Delegate())
         names={n for n in vars(type(hooks)) if not n.startswith('_')}
         self.assertEqual(names,{'catalogue_opened','catalogue_closing','ledger_opened','ledger_serving','ledger_closing'})
         hooks.catalogue_opened();hooks.ledger_opened(P);hooks.ledger_serving(P);hooks.ledger_closing(P);hooks.catalogue_closing()
         self.assertEqual([c[0] for c in calls],['catalogue_opened','ledger_opened','ledger_serving','ledger_closing','catalogue_closing'])
         self.assertTrue(all(c[2]==owner for c in calls))
+        self.assertEqual([c[3] for c in calls], [{}, {}, {}, {'deadline': None}, {'deadline': None}])
 
     def test_queue_outcomes_not_raised_yet(self):
         w=self.worker();self.damage()

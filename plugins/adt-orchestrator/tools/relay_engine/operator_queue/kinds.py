@@ -22,6 +22,7 @@ NOTICE_SUBKINDS = frozenset({
     'settlement_finished', 'settlement_undone', 'engine_stopped', 'engine_started',
     'project_stopped', 'project_started', 'engine_was_down', 'merge_target_changed',
     'approval_seal_unusable', 'approval_seal_backup_included',
+    'restore_command_started', 'report_awaiting_confirmation',
 })
 STATES = frozenset({'pending', 'applying', 'resolved', 'superseded', 'refused', 'faulted',
                     'dismissed', 'withdrawn', 'cleared', 'retired'})
@@ -34,12 +35,13 @@ NO_PROJECT_SUBKINDS = frozenset({'notifier_unhealthy', 'worker_stalled', 'bridge
     'panel_key_enrolled', 'engine_updated', 'engine_update_failed', 'instruction_carried',
     'seat_record_missing', 'seat_ambiguous', 'backup_missed', 'engine_stopped',
     'engine_started', 'engine_was_down', 'approval_seal_backup_included'})
+EITHER_PROJECT_SUBKINDS = frozenset({'restore_command_started', 'report_awaiting_confirmation'})
 NO_CLEAR_SUBKINDS = frozenset({'bridge_refused', 'panel_key_enrolled', 'instruction_carried',
                              'seat_record_missing', 'seat_ambiguous', 'merge_target_changed'})
 OPERATOR_CLOSED_SUBKINDS = frozenset({'instruction_carried'})
 STALL_WORKERS = ('queue_reconcile', 'queue_question_ingest', 'queue_lifecycle_ingest', 'engine_liveness', 'store_backup_daily')
 SURFACES = frozenset({'page', 'frank_panel'})
-ENABLED_TAGS = frozenset({'pr1', 'pr3'})
+ENABLED_TAGS = frozenset({'pr1', 'pr3', 'pr3e'})
 
 
 @dataclass(frozen=True)
@@ -79,10 +81,18 @@ RAISER_MATRIX = (
     RaiserRow('notice', 'engine_was_down', 'internal', 'console_queue', 'pr3', None),
     RaiserRow('notice', 'merge_target_changed', 'internal', 'console_queue', 'pr3', None),
     RaiserRow('notice', 'seat_unseated', 'internal', 'console_queue', 'pr3', None),
+    RaiserRow('notice', 'approval_seal_unusable', 'queue.raise', 'approval_seal', 'pr3', None),
+    RaiserRow('notice', 'approval_seal_backup_included', 'queue.raise', 'approval_seal', 'pr3',
+              frozenset({'backup_exclusion'})),
+    RaiserRow('notice', 'restore_command_started', 'internal', 'console_queue', 'pr3e', None),
+    RaiserRow('notice', 'report_awaiting_confirmation', 'internal', 'console_queue', 'pr3e', None),
 )
 
 RING_SET = frozenset({'question', 'cross_project_permission', 'merge_go_ahead', 'verification_held',
-    'notice/doorbell_off', 'notice/instruction_carried', 'notice/worker_stalled', 'notice/bridge_refused', 'notice/answer_faulted', 'notice/backup_missed', 'notice/merge_target_changed'})
+    'notice/doorbell_off', 'notice/instruction_carried', 'notice/worker_stalled', 'notice/bridge_refused', 'notice/answer_faulted', 'notice/backup_missed', 'notice/merge_target_changed',
+    'notice/approval_seal_unusable',
+    'notice/restore_command_started', 'notice/report_awaiting_confirmation',
+})
 FIXED_TEXTS: Mapping[tuple[str, str], str] = MappingProxyType({('worker_stalled', 'queue_question_ingest'): "v3 has stopped turning agents' questions into "
                                               'items, so new questions are not shown. Run adt '
                                               'engine status.',
@@ -114,6 +124,19 @@ ANSWER_FAULTED_TEXTS: Mapping[str, str] = MappingProxyType({
     'question': "v3 stopped an answer you gave: a different version had already been sent to this agent, which only a fault in v3 can cause. Open the question on v3's page to check it.",
 })
 PIN_TOKENS: Mapping[str, tuple[str, str]] = MappingProxyType({})
+
+
+def seal_key_valid(key: Mapping) -> bool:
+    if not isinstance(key, Mapping) or key.keys() != {'chain_id', 'cause'}:
+        return False
+    chain, cause = key['chain_id'], key['cause']
+    if not isinstance(chain, str) or not isinstance(cause, str):
+        return False
+    if chain == 'none':
+        return cause in {'pointer_unset', 'folder_unusable', 'pointer_damaged'}
+    return bool(chain) and '\0' not in chain and cause in {
+        'counter_unusable', 'high_water_unusable', 'ledger_chain_mismatch',
+    }
 
 
 def raiser_row(kind: str, subkind: str | None, principal: str, *, enabled: frozenset[str]) -> RaiserRow | None:

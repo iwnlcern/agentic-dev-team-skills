@@ -1,6 +1,7 @@
 """Pure display arguments and bounded, durable outbox delivery."""
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone, tzinfo
 import json
 
 from relay_engine import store_layout
@@ -53,18 +54,43 @@ def _popup_text(kind, texts, popup):
     return texts['ring_text'] if 'ring_text' in texts else texts['sentence']
 
 
+def popup_time(at: str | int, tz: tzinfo | None = None) -> str:
+    try:
+        if isinstance(at, str):
+            instant = datetime.fromisoformat(at)
+            if instant.utcoffset() is None:
+                raise ValueError('popup time needs a UTC offset')
+        elif type(at) is int:
+            instant = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=at)
+        else:
+            raise ValueError('popup time needs an ISO timestamp or integer milliseconds')
+        local = instant.astimezone(tz)
+    except (OverflowError, OSError) as error:
+        raise ValueError('popup time outside the supported range') from error
+    return (f'{local.year:04d}-{local.month:02d}-{local.day:02d} '
+            f'{local.hour:02d}:{local.minute:02d}')
+
+
 def due_notifications(conn, now_ms, limit: int) -> list[Notification]:
     rows = records._rows(conn, 'SELECT n.item_id,n.revision,i.project_id,i.actor_address,'
-                         'i.raiser,i.kind,i.texts,i.popup_text FROM queue_notifications n '
+                         'i.raiser,i.kind,i.subkind,i.texts,i.popup_text,i.pins FROM queue_notifications n '
                          'JOIN queue_items i ON i.item_id=n.item_id '
                          "WHERE n.state='pending' AND n.next_attempt_at_ms<=? "
                          'ORDER BY i.raised_position,n.item_id,n.revision LIMIT ?',
                          (now_ms, max(0, limit)))
     notes = []
-    for item, revision, project, actor, raiser, kind, texts, popup in rows:
+    for item, revision, project, actor, raiser, kind, subkind, texts, popup, pins in rows:
         name = None if project is None else store_layout.route(conn, project_id=project).name
+        texts = json.loads(texts)
+        text = _popup_text(kind, texts, popup)
+        if subkind == 'approval_seal_unusable' and name is not None and 'ring_text' in texts:
+            text = texts['ring_text'].replace('<project>', name)
+        elif subkind == 'restore_command_started':
+            text = texts['sentence'].replace('<time>', popup_time(json.loads(pins)['at']))
+            if name is not None:
+                text = text.replace('<project>', name)
         notes.append(Notification(item, revision, notification_title(name, actor if actor is not None else raiser),
-                                  _popup_text(kind, json.loads(texts), popup)))
+                                  text))
     return notes
 
 

@@ -5,11 +5,13 @@ import os
 from pathlib import Path
 import queue as channels
 import threading
+from time import monotonic
 from collections.abc import Callable
 import uuid
 
 from . import seal_slots as slots, store_layout, strings
 from .api_principals import ServicePrincipal
+from .api_writer import StopDeadline
 from .seal_types import SealReportDropped, SealCalleeFailed, POINTER_UNREADABLE
 
 
@@ -72,6 +74,9 @@ class SealWorker:
         self._leave, self._generation = False, 0
         self._reader, self._reader_gen, self._inflight = None, None, None
         self._closing = []
+        self._catalogue_close_late = set()
+        # One outstanding count per acquired reader, including stale candidates.
+        self._unacknowledged = {}
         self._wake, self._check, self._stopping = True, False, False
         self._idle, self._stopped = threading.Event(), threading.Event()
         self._thread, self._ticker, self._error = None, None, None
@@ -93,19 +98,23 @@ class SealWorker:
     def start(self):
         if self._thread is not None:
             raise RuntimeError('seal_worker_already_started')
-        self._thread = threading.Thread(target=self._own, name='seal-worker', daemon=True)
-        self._ticker = threading.Thread(target=self._ticks, name='seal-worker-tick', daemon=True)
-        self._thread.start(); self._ticker.start()
+        owner = threading.Thread(target=self._own, name='seal-worker', daemon=True)
+        ticker = threading.Thread(target=self._ticks, name='seal-worker-tick', daemon=True)
+        owner.start()
+        self._thread = owner
+        ticker.start()
+        self._ticker = ticker
 
-    def stop(self):
+    def stop(self, deadline: float | None = None) -> bool:
         with self._condition:
             self._stopping = True
         self._notify()
-        if self._thread is not None:
-            self._thread.join()
-        if self._ticker is not None:
-            self._ticker.join()
+        threads = tuple(thread for thread in (self._thread, self._ticker) if thread is not None)
+        for thread in threads:
+            thread.join(None if deadline is None else max(0, deadline - monotonic()))
         self.channel._notify = None
+        with self._condition:
+            return not any(thread.is_alive() for thread in threads) and not self._unacknowledged
 
     def catalogue_opened(self):
         with self._condition:
@@ -114,7 +123,14 @@ class SealWorker:
             self._check = True
         self._notify()
 
-    def catalogue_closing(self):
+    def _wait_closing_half(self, done, deadline):
+        seconds = self.bound_s / 2
+        end = deadline.at() if deadline is not None else None
+        if end is not None:
+            seconds = min(seconds, end - monotonic())
+        return seconds > 0 and self.wait(done, seconds)
+
+    def catalogue_closing(self, *, deadline: StopDeadline | None = None) -> bool:
         done = threading.Event()
         with self._condition:
             generation = self._generation
@@ -122,12 +138,17 @@ class SealWorker:
             self._generation += 1
             self._closing.append((generation, done))
         self._notify()
-        if not self.wait(done, self.bound_s / 2):
+        if not self._wait_closing_half(done, deadline):
             with self._condition:
                 reader = self._reader
-                if reader is not None:
+                if reader is not None and self._reader_gen == generation and not done.is_set():
                     reader.interrupt()
-            self.wait(done, self.bound_s / 2)
+            self._wait_closing_half(done, deadline)
+        with self._condition:
+            confirmed = done.is_set() and generation not in self._unacknowledged
+            if not confirmed:
+                self._catalogue_close_late.add(generation)
+            return confirmed
 
     def _ticks(self):
         while self.tick(60):
@@ -141,24 +162,41 @@ class SealWorker:
         with self._condition:
             return self._leave and generation == self._generation
 
+    def _close_reader(self, reader, generation):
+        try:
+            reader.close()
+        except Exception as exc:
+            self._reader_failed = True
+            strings.report_diagnostic(SealCalleeFailed('catalogue', type(exc).__name__, None))
+        else:
+            with self._condition:
+                remaining = self._unacknowledged[generation] - 1
+                if remaining:
+                    self._unacknowledged[generation] = remaining
+                else:
+                    del self._unacknowledged[generation]
+
+    def _signal_catalogue_closings(self):
+        # Owner-only, with the condition held and no open/read still in flight.
+        for generation, done in self._closing:
+            if self._reader_gen != generation:
+                done.set()
+        self._closing = [(g, done) for g, done in self._closing if not done.is_set()]
+
     def _reader_boundary(self):
-        if self._reader_failed:
-            return False
         with self._condition:
             stale = self._reader is not None and (not self._leave or self._reader_gen != self._generation)
-        if stale:
-            with self._condition:
-                reader = self._reader
+            if stale:
+                reader, reader_gen = self._reader, self._reader_gen
                 self._reader, self._reader_gen = None, None
-            reader.close()
+        if stale:
+            self._close_reader(reader, reader_gen)
         with self._condition:
-            # This executes on the owner, hence an in-flight open/read has ended.
-            for generation, done in self._closing:
-                if self._reader_gen != generation:
-                    done.set()
-            self._closing = [(g,d) for g,d in self._closing if not d.is_set()]
+            self._signal_catalogue_closings()
             leave, generation = self._leave, self._generation
             missing = self._reader is None
+        if self._reader_failed:
+            return False
         if leave and missing:
             try:
                 reader = self.open_catalogue_reader(self.store_root)
@@ -166,12 +204,16 @@ class SealWorker:
                 self._reader_failed = True
                 strings.report_diagnostic(SealCalleeFailed('catalogue', type(exc).__name__, None))
                 return False
-            if not self._valid(generation):
-                reader.close()
-                return
             with self._condition:
-                self._reader, self._reader_gen = reader, generation
-                self._listed_gen = None
+                self._unacknowledged[generation] = self._unacknowledged.get(generation, 0) + 1
+                if self._leave and generation == self._generation:
+                    self._reader, self._reader_gen = reader, generation
+                    self._listed_gen = None
+                    return True
+            self._close_reader(reader, generation)
+            with self._condition:
+                self._signal_catalogue_closings()
+            return False
         return True
 
     def _read(self, call, *args):
@@ -191,7 +233,7 @@ class SealWorker:
             self._reader_failed = True
             with self._condition:
                 self._reader, self._reader_gen = None, None
-            reader.close()
+            self._close_reader(reader, generation)
             return None
         finally:
             with self._condition:
@@ -510,14 +552,16 @@ class SealWorker:
             self._error = exc
         finally:
             with self._condition:
-                reader = self._reader
+                reader, generation = self._reader, self._reader_gen
                 self._reader, self._reader_gen = None, None
-            if reader is not None:
-                reader.close()
-            for _,done in self._closing:
-                done.set()
-            self._stopped.set()
-            self._idle.set()
+            try:
+                if reader is not None:
+                    self._close_reader(reader, generation)
+            finally:
+                with self._condition:
+                    self._signal_catalogue_closings()
+                self._stopped.set()
+                self._idle.set()
 
 
 class SealHooks:
@@ -533,8 +577,8 @@ class SealHooks:
     def ledger_serving(self, project_id):
         self.renderer.ledger_serving(project_id)
 
-    def ledger_closing(self, project_id):
-        self.renderer.ledger_closing(project_id)
+    def ledger_closing(self, project_id, *, deadline: StopDeadline | None = None) -> bool:
+        return self.renderer.ledger_closing(project_id, deadline=deadline)
 
-    def catalogue_closing(self):
-        self.worker.catalogue_closing()
+    def catalogue_closing(self, *, deadline: StopDeadline | None = None) -> bool:
+        return self.worker.catalogue_closing(deadline=deadline)

@@ -36,15 +36,21 @@ EXPECTED_MATRIX = (
     ('notice', 'merge_target_changed', 'internal', 'console_queue', 'pr3', None),
     ('notice', 'seat_unseated', 'internal', 'console_queue', 'pr3', None),
 
+    ('notice', 'approval_seal_unusable', 'queue.raise', 'approval_seal', 'pr3', None),
+    ('notice', 'approval_seal_backup_included', 'queue.raise', 'approval_seal', 'pr3',
+     frozenset({'backup_exclusion'})),
+    ('notice', 'restore_command_started', 'internal', 'console_queue', 'pr3e', None),
+    ('notice', 'report_awaiting_confirmation', 'internal', 'console_queue', 'pr3e', None),
 )
-ALL_TAGS = frozenset({'pr1','pr2','pr3','pr3c','pr4','pr5','pr6'})
+ALL_TAGS = frozenset({'pr1','pr2','pr3','pr3c','pr3e','pr4','pr5','pr6'})
 NOTICE_NAMES = frozenset({'seat_registered','seat_replaced','seat_stood_down','seat_unseated',
     'engine_restart_requested','engine_updated','engine_update_failed','doorbell_off',
     'notifier_unhealthy','operator_act_carried','worker_stalled','bridge_refused',
     'panel_key_enrolled','answer_faulted','instruction_carried','seat_record_missing','seat_ambiguous','backup_missed',
     'settlement_finished','settlement_undone','engine_stopped','engine_started',
     'project_stopped','project_started','engine_was_down','merge_target_changed',
-    'approval_seal_unusable','approval_seal_backup_included'})
+    'approval_seal_unusable','approval_seal_backup_included',
+    'restore_command_started','report_awaiting_confirmation'})
 
 
 class TestQueueKinds(unittest.TestCase):
@@ -62,6 +68,7 @@ class TestQueueKinds(unittest.TestCase):
         domains = {
             'KINDS': {'question','cross_project_permission','merge_go_ahead','verification_held','notice'},
             'NOTICE_SUBKINDS': NOTICE_NAMES,
+            'EITHER_PROJECT_SUBKINDS': {'restore_command_started','report_awaiting_confirmation'},
             'STATES': {'pending','applying','resolved','superseded','refused','faulted','dismissed','withdrawn','cleared','retired'},
             'EVENT_KINDS': {'raised','answered','applied','superseded','refused','faulted','withdrawn','opened','dismissed','dismissed_all','cleared','clear_requested','condition_closed','retired'},
             'NOTIFICATION_STATES': {'pending','delivered','retired'},
@@ -76,7 +83,7 @@ class TestQueueKinds(unittest.TestCase):
         self.assertEqual(kinds.STALL_WORKERS,WORKERS)
 
     def test_rows_enabled_by_pr(self):
-        self.assertEqual(kinds.ENABLED_TAGS, frozenset({'pr1','pr3'}))
+        self.assertEqual(kinds.ENABLED_TAGS, frozenset({'pr1','pr3','pr3e'}))
         for expected in EXPECTED_MATRIX:
             row = kinds.raiser_row(expected[0],expected[1],expected[3],enabled=frozenset({'pr1'}))
             self.assertEqual(row is not None,expected[4]=='pr1')
@@ -86,7 +93,8 @@ class TestQueueKinds(unittest.TestCase):
 
     def test_ring_set(self):
         expected = frozenset({'question','cross_project_permission','merge_go_ahead','verification_held',
-                             'notice/doorbell_off','notice/instruction_carried','notice/worker_stalled','notice/bridge_refused','notice/answer_faulted','notice/backup_missed','notice/merge_target_changed'})
+                             'notice/doorbell_off','notice/instruction_carried','notice/worker_stalled','notice/bridge_refused','notice/answer_faulted','notice/backup_missed','notice/merge_target_changed','notice/approval_seal_unusable',
+                             'notice/restore_command_started','notice/report_awaiting_confirmation'})
         self.assertEqual(kinds.RING_SET,expected)
         for member in expected:
             parts=member.split('/')

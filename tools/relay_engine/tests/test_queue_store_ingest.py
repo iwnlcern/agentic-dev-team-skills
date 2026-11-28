@@ -1,12 +1,14 @@
 """Store-level lifecycle sources, skip records and pre-join drain semantics."""
+from datetime import timedelta, timezone
 import json
+import sqlite3
 import unittest
 from unittest import mock
 
-from relay_engine import api_writer, store_layout, store_steps
+from relay_engine import api_writer, store_items, store_layout, store_steps
 from relay_engine.jcs import jcs_encode
-from relay_engine.operator_queue import component, ingest, notice_text, records
-from relay_engine.tests.test_catalogue import P
+from relay_engine.operator_queue import component, ingest, notice_text, notifier, operations, records
+from relay_engine.tests.test_catalogue import P, Q
 from relay_engine.tests.test_queue_ingest import QueueFixture, Port
 
 
@@ -428,3 +430,323 @@ class TestStoreIngest(unittest.TestCase):
                 self.assertEqual([r[0] for r in self.items()].count('project_started'),
                                  int(start_seen))
         self.assertEqual(self.run_pass(), 0)
+
+
+class TestStoreOperatorItems(unittest.TestCase):
+    REPORT = 'report_awaiting_confirmation'
+    START = 'restore_command_started'
+    AT = '2026-11-11T06:22:41Z'
+    REPORT_PREFIX = ('Projects wait until you confirm you have seen the report of restore job J: '
+                     'run adt store confirm-report J. The report is at ')
+
+    def setUp(self):
+        self.reset_fixture()
+
+    def reset_fixture(self):
+        self.f = QueueFixture(self)
+        self.c = self.f.catalogue
+        self.port = StorePort(self.f)
+        self.log = self.f.root / 'lifecycle.jsonl'
+
+    def write(self, subject, *, kind=REPORT, project=None, fields=None):
+        if fields is None:
+            fields = {'report_path': f'/recovery/{subject}/report.txt'}
+        return store_items.write_raise(self.c, kind=kind, subject=subject, project_id=project,
+                                       fields=fields, at_ms=self.f.clock)
+
+    def start(self, subject, *, project=None, scope='the whole store', **fields):
+        return self.write(subject, kind=self.START, project=project,
+                          fields=dict(dict(command='restore', scope=scope, started_at=self.AT), **fields))
+
+    def end(self, row_id):
+        return store_items.write_end(self.c, raise_id=row_id, fields={}, at_ms=self.f.clock)
+
+    def run_pass(self):
+        return ingest.store_ingest_pass(self.port, self.log, self.f.clock).raised
+
+    def drain(self):
+        return ingest.store_ingest_startup(self.port, self.log, self.f.clock)
+
+    def rows(self, sql, args=()):
+        return records._rows(self.c, sql, args)
+
+    def source(self, row_id):
+        return self.rows('SELECT item_id FROM queue_store_item_sources WHERE raise_row_id=?',
+                         (row_id,))
+
+    def item(self, row_id):
+        [(item_id,)] = self.source(row_id)
+        item = operations.get_item(self.c, item_id, 20, None)['item']
+        item['texts'] = json.loads(item['texts'])
+        return item
+
+    def position(self):
+        return records.read_cursor(self.c, None, 'store_items').position
+
+    def skips(self):
+        return self.rows("SELECT row_ref,reason FROM queue_ingest_skips WHERE source='store_items' "
+                         "ORDER BY CAST(row_ref AS INTEGER)")
+
+    def counts(self):
+        return tuple(self.rows('SELECT COUNT(*) FROM ' + table)[0][0]
+                     for table in ('queue_items', 'queue_conditions', 'queue_events',
+                                   'queue_store_item_sources', 'queue_notifications'))
+
+    def test_report_item_raise_and_end(self):
+        for mode in ('pending', 'opened', 'restart', 'same-pass', 'no-clear-control'):
+            with self.subTest(mode=mode):
+                self.reset_fixture()
+                row = self.write('J')
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.write('J')
+                if mode != 'same-pass':
+                    self.assertEqual(self.run_pass(), 1)
+                    [(item_id,)] = self.source(row)
+                    self.assertEqual(self.rows('SELECT condition_key FROM queue_items'), [('"J"',)])
+                    self.assertEqual(len(notifier.due_notifications(self.c, self.f.clock, 10)), 1)
+                    if mode == 'opened':
+                        operations.open_notice(self.c, self.f.operator, item_id, 1, 'open', self.f.clock)
+                    if mode == 'restart':
+                        self.c.close()
+                        self.c = self.f.catalogue = store_layout.open_catalogue(self.f.root / 'store')
+                        self.addCleanup(self.c.close)
+                        self.port = StorePort(self.f)
+                end = self.end(row)
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.end(row)
+                if mode == 'no-clear-control':
+                    with mock.patch.object(records, 'clear_condition', return_value=records.ClearResult('closed')):
+                        self.run_pass()
+                    self.assertEqual(self.item(row)['state'], 'pending')
+                else:
+                    self.run_pass()
+                    self.assertEqual(self.item(row)['state'], 'dismissed' if mode == 'opened' else 'cleared')
+                    self.assertEqual(self.rows('SELECT closed_at_ms FROM queue_conditions'), [(self.f.clock,)])
+                bad = self.write('X', fields={})
+                last = self.end(bad)
+                before = self.counts()
+                self.assertEqual(self.run_pass(), 0)
+                self.assertEqual(self.counts(), before)
+                self.assertEqual(self.source(bad), [])
+                self.assertEqual(self.position(), last)
+                self.assertGreater(last, end)
+
+    def test_creating_route_starting_item_store_scoped(self):
+        self.c.execute("UPDATE project_routes SET state='creating' WHERE project_id=?", (P,)).close()
+        creating = self.start('J', scope='Acme, which is still being created', command='abandon J')
+        inactive = self.start('inactive', project=P, scope='project <project>')
+        bad_store = self.start('bad-store', scope='project <project>')
+        bad_project = self.start('bad-project', project=Q,
+            scope='Acme, which is still being created')
+        self.assertEqual(self.run_pass(), 1)
+        notice, = notifier.due_notifications(self.c, self.f.clock, 10)
+        self.assertEqual(notice.title, 'v3: console_queue')
+        prefix = 'A restore command started: abandon J for Acme, which is still being created, run at'
+        for value in (self.item(creating)['texts']['sentence'], notice.text):
+            self.assertTrue(value.startswith(prefix))
+            self.assertNotIn('<project>', value)
+        self.assertEqual(self.source(inactive), [])
+        self.assertEqual(self.skips(), [(str(bad_store), 'bad_field:scope'), (str(bad_project), 'bad_field:scope')])
+        self.assertEqual(self.position(), bad_project)
+        self.c.execute("UPDATE project_routes SET state='active' WHERE project_id=?", (P,)).close()
+        self.c.execute("DELETE FROM queue_highwaters WHERE source='store_items'").close()
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.item(inactive)['project_id'], P)
+
+    def test_store_item_missing_field(self):
+        a = self.write('A', fields={})
+        b = self.write('B', kind=self.START, fields={'command':'restore','scope':'the whole store'})
+        c = self.write('C')
+        d = self.start('D')
+        self.assertEqual(self.run_pass(), 2)
+        self.assertEqual(self.position(), d)
+        self.assertEqual(self.skips(), [(str(a), 'missing_field:report_path'), (str(b), 'missing_field:started_at')])
+        self.assertEqual(self.source(a) + self.source(b), [])
+        self.assertEqual(self.item(c)['state'], 'pending')
+        self.assertEqual(self.item(d)['state'], 'pending')
+        self.assertEqual(self.counts(), (2, 2, 2, 2, 2))
+
+    def test_store_item_keeps_fields(self):
+        p = '/recovery/J/report.txt'
+        row = self.write('J', fields={'report_path': p})
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.item(row)['fields'], {'report_path': p})
+        self.c.execute("DELETE FROM queue_highwaters WHERE source='store_items'").close()
+        self.assertEqual(self.run_pass(), 0)
+        self.assertEqual(self.item(row)['fields'], {'report_path': p})
+        req = records.RaiseRequest('notice', 'seat_registered', P, {'sentence': 'Seat registered'},
+                                   {}, {'row_id':'seat-row'}, 'seat-control')
+        result = records.raise_item(self.c, records.InternalWriter(), req, self.f.clock,
+                                    enabled=frozenset({'pr3'}))
+        self.assertIsNone(operations.get_item(self.c, result.item_id, 20, None)['item']['fields'])
+
+    def test_store_item_texts_exact(self):
+        first = 'A restore command started: <command> for <scope>, run at <time> after the operator check passed.'
+        ordinary = 'It will withdraw go-aheads and approvals there and grants none; what it did follows in its report.'
+        abandon = 'It withdraws nothing and grants nothing; <scope> stays held until the step its report names has run.'
+        resolve = ("It answers the question about <project>'s unfinished changes and grants nothing: a no undoes them, "
+                   "with a notice for each, unless the store was put back, when nothing changes and <project> waits "
+                   "for adopt-restored; a yes or not sure starts adopt-restored.")
+        for template, byte_count in ((first, 74), (ordinary, 98), (abandon, 93), (resolve, 237)):
+            result = template
+            for token in ('<command>', '<scope>', '<time>', '<project>'):
+                result = result.replace(token, '')
+            self.assertEqual(len(result.encode()), byte_count)
+        for command, tail in [('restore', ordinary), ('adopt-restored', ordinary), ('new-folder pass', ordinary),
+                              ('abandon J', abandon), ('resolve-reservation', resolve)]:
+            row = notice_text.StoreItemRow(1, self.START, P, 'J', None, 0,
+                                           {'command':command, 'scope':'project <project>', 'started_at':self.AT})
+            texts, pins = notice_text.store_item_texts(row)
+            self.assertEqual(texts['sentence'],
+                             (first + ' ' + tail).replace('<command>', command).replace('<scope>', 'project <project>'))
+            self.assertEqual(pins['at'], self.AT)
+        row = notice_text.StoreItemRow(2, self.REPORT, None, 'J', None, 0, {'report_path': '/r/J'})
+        texts, _ = notice_text.store_item_texts(row)
+        self.assertEqual(texts['sentence'], self.REPORT_PREFIX + '/r/J.')
+        self.assertEqual(len((self.REPORT_PREFIX + '.').replace('J','').encode()), 123)
+        row = notice_text.StoreItemRow(3, self.START, None, 'J', None, 0,
+                                       {'command':'mirror recovery','scope':'the whole store','started_at':self.AT})
+        self.assertEqual(notice_text.store_item_texts(row), 'bad_field:command')
+
+    def test_store_item_popup_time(self):
+        east = timezone(timedelta(hours=1))
+        instant_ms = 1794378161000
+        shown = '2026-11-11 07:22'
+        for value in (self.AT, instant_ms):
+            out = notifier.popup_time(value, east)
+            self.assertEqual(out, shown)
+            self.assertEqual(len(out.encode()), 16)
+            self.assertEqual(notifier.popup_time(value, timezone.utc), '2026-11-11 06:22')
+        row = self.start('J', project=P, scope='project <project>')
+        bad = self.start('K', started_at='2026-11-11 06:22')
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.skips(), [(str(bad), 'bad_field:started_at')])
+        self.assertEqual(self.source(bad), [])
+        formatter = notifier.popup_time
+        with mock.patch.object(notifier, 'popup_time', side_effect=lambda value: formatter(value, east)):
+            note, = notifier.due_notifications(self.c, self.f.clock, 10)
+        self.assertIn(f'project p, run at {shown} after', note.text)
+        self.assertNotIn('<time>', note.text)
+        self.assertIn('project <project>, run at <time> after', self.item(row)['texts']['sentence'])
+
+    def test_hold_kind_skipped_until_pr3d(self):
+        row = self.write('hold', kind='project_held_5d', project=P, fields={})
+        self.end(row)
+        last = self.write('J')
+        formatter = getattr(notice_text, 'store_item_texts', None)
+        if formatter is not None:
+            def not_a_skip(item):
+                if item.kind == 'project_held_5d':
+                    raise ValueError('unknown kind')
+                return formatter(item)
+            with mock.patch.object(notice_text, 'store_item_texts', side_effect=not_a_skip):
+                with self.assertRaises(ValueError):
+                    self.run_pass()
+            self.assertEqual(self.counts(), (0, 0, 0, 0, 0))
+            self.assertEqual(self.position(), 0)
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.position(), last)
+        self.assertEqual(self.skips(), [(str(row), 'unknown_kind:project_held_5d')])
+        self.assertEqual(self.source(row), [])
+        self.assertEqual(self.item(last)['state'], 'pending')
+
+    def test_startup_drains_store_item_backlog(self):
+        for mode in ('pass', 'startup', 'unavailable'):
+            with self.subTest(mode=mode):
+                self.reset_fixture()
+                rows = [self.write(str(i), fields={} if i < 100 else None) for i in range(150)]
+                if mode == 'pass':
+                    self.assertEqual(self.run_pass(), 0)
+                elif mode == 'startup':
+                    self.assertEqual(self.drain(), 50)
+                else:
+                    job = ingest.ingest_store_items
+                    with mock.patch.object(ingest, 'ingest_store_items', side_effect=[
+                            mock.DEFAULT, records.JobUnavailable('test')], wraps=job):
+                        with self.assertRaises(ingest.StartupIngestIncomplete) as caught:
+                            self.drain()
+                    self.assertEqual(caught.exception.source, 'store_items')
+                self.assertEqual(self.position(), rows[149 if mode == 'startup' else 99])
+                self.assertEqual(len(self.skips()), 100)
+                self.assertEqual(self.counts()[0], 50 if mode == 'startup' else 0)
+
+    def test_store_items_cursor(self):
+        row = self.write('J', project=P)
+        self.assertEqual(self.run_pass(), 1)
+        select = "SELECT project_id,position,anchor_id FROM queue_highwaters WHERE source='store_items'"
+        self.assertEqual(self.rows(select), [(None, row, None)])
+        before = self.source(row)
+        records.undo_step(self.c, P, 'undo-J', now_ms=self.f.clock)
+        self.assertEqual(self.rows(select), [(None, row, None)])
+        self.assertEqual(self.source(row), before)
+
+    def test_store_item_fields_out_of_range_integer(self):
+        def write_number(key, value):
+            cur = self.c.execute('INSERT INTO store_operator_items (kind,subject,at,fields) VALUES (?,?,?,?)',
+                                 (self.REPORT, key, self.f.clock, json.dumps({'report_path':'/r', 'n': value})))
+            try:
+                return cur.lastrowid
+            finally:
+                cur.close()
+        m = 2 ** 53 - 1
+        a, b, c = write_number('A', m), write_number('B', m+1), write_number('C', {'deep': [m+1]})
+        d = self.write('D')
+        with mock.patch.object(notice_text, 'fit_integers', side_effect=lambda value: value):
+            self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.position(), a)
+        self.assertEqual(self.source(b) + self.source(c) + self.source(d), [])
+        self.assertEqual(self.skips(), [])
+        self.assertEqual(self.run_pass(), 3)
+        for row, value in ((a,m), (b,str(m+1)), (c,{'deep':[str(m+1)]})):
+            self.assertEqual(self.item(row)['fields']['n'], value)
+        self.assertEqual(self.item(d)['state'], 'pending')
+
+    def test_store_item_refused_row_rolls_back_and_prefix_commits(self):
+        for mode in ('pass', 'startup'):
+            with self.subTest(mode=mode):
+                self.reset_fixture()
+                a, b, c = (self.write(key) for key in 'ABC')
+                real = records.raise_item
+                def refuse(conn, writer, req, *args, **kwargs):
+                    if req.condition_key == 'B':
+                        return records.QueueRefusal('E_QUEUE_INVALID', 'subject_unresolved')
+                    return real(conn, writer, req, *args, **kwargs)
+                with mock.patch.object(records, 'raise_item', side_effect=refuse):
+                    if mode == 'startup':
+                        with self.assertRaises(ingest.StartupIngestIncomplete) as caught:
+                            self.drain()
+                        self.assertEqual((caught.exception.source, caught.exception.cause), ('store_items', 'refused'))
+                    else:
+                        self.assertEqual(self.run_pass(), 1)
+                self.assertEqual(self.counts(), (1, 1, 1, 1, 1))
+                self.assertEqual(self.position(), a)
+                self.assertEqual(self.item(a)['state'], 'pending')
+                self.assertEqual(self.source(b) + self.source(c), [])
+                self.assertEqual(self.skips(), [])
+                self.assertEqual(self.run_pass(), 2)
+                self.assertEqual(self.counts(), (3, 3, 3, 3, 3))
+                self.assertEqual(self.position(), c)
+                self.assertEqual(self.run_pass(), 0)
+
+    def test_store_item_texts_fit(self):
+        space = 4096 - len((self.REPORT_PREFIX + '.').encode())
+        a = self.write('J', fields={'report_path': 'x' * space})
+        b = self.write('K', fields={'report_path': 'x' * (space+1)})
+        c = self.write('L', fields={'report_path': 'x\x00'})
+        d = self.write('M')
+        formatter = notice_text.store_item_texts
+        def no_size_check(row):
+            if row.id == b:
+                return {'sentence': self.REPORT_PREFIX.replace('J', 'K') + 'x' * (space+1) + '.'}, {}
+            return formatter(row)
+        with mock.patch.object(notice_text, 'store_item_texts', side_effect=no_size_check):
+            self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.position(), a)
+        self.assertEqual(self.source(b) + self.source(d), [])
+        self.assertEqual(self.skips(), [])
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.position(), d)
+        self.assertEqual(len(self.item(a)['texts']['sentence'].encode()), 4096)
+        self.assertEqual(self.skips(), [(str(b), 'bad_texts:sentence'), (str(c), 'bad_texts:sentence')])
+        self.assertEqual(self.source(b) + self.source(c), [])
+        self.assertEqual(self.item(d)['state'], 'pending')
